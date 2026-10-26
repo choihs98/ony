@@ -1,11 +1,13 @@
 #pragma once
 #include <QColor>
+#include <QImage>
 #include <QTimer>
 #include <QWidget>
 
 #include "Brush.h"
 
 class QToolButton;
+class QImage;
 class QSlider;
 class QCheckBox;
 class QComboBox;
@@ -31,7 +33,38 @@ signals:
     void historyRequested(const QPoint& globalPos);
 };
 
-// 색상 패널: A/B 색상 + 견본
+// 색상환: 바깥 고리 = 색조, 안쪽 삼각형 = 채도/명도
+class ColorWheel : public QWidget {
+    Q_OBJECT
+public:
+    explicit ColorWheel(QWidget* parent = nullptr);
+    QColor color() const;
+    void setColor(const QColor& c);
+    QSize sizeHint() const override { return QSize(170, 170); }
+    QSize minimumSizeHint() const override { return QSize(120, 120); }
+signals:
+    void colorChanged(const QColor&);
+protected:
+    void paintEvent(QPaintEvent*) override;
+    void mousePressEvent(QMouseEvent*) override;
+    void mouseMoveEvent(QMouseEvent*) override;
+    void mouseReleaseEvent(QMouseEvent*) override;
+    void resizeEvent(QResizeEvent*) override;
+private:
+    enum class Drag { None, Ring, Tri };
+    QPointF center() const;
+    double outer() const;
+    double inner() const;
+    void triPoints(QPointF& pHue, QPointF& pWhite, QPointF& pBlack) const;
+    void handle(const QPointF& pos, bool press);
+    void rebuild();
+    double h_ = 0, s_ = 0, v_ = 0; // h: 0~360
+    Drag drag_ = Drag::None;
+    QImage cache_;
+    double cacheH_ = -1;
+};
+
+// 색상 패널: A/B 색상 + 색상환 + 견본
 class ColorPanel : public QWidget {
     Q_OBJECT
 public:
@@ -47,9 +80,12 @@ private:
     QColor a_{Qt::black}, b_{Qt::white};
     QToolButton* btnA_;
     QToolButton* btnB_;
+    ColorWheel* wheel_;
+    QLabel* rgb_;
+    bool syncing_ = false;
 };
 
-// 도구 패널: 브러시 프리셋 + 크기/불투명도/경도/필압
+// 도구 패널: 브러시 아이콘 + 크기/불투명도/경도/필압
 class ToolPanel : public QWidget {
     Q_OBJECT
 public:
@@ -62,15 +98,17 @@ signals:
     void brushSelected(int row);
     void paramsChanged(const BrushParams& p);
 private:
-    QListWidget* list_;
+    QListWidget* list_;           // 숨겨진 모델 (선택 행 = 프리셋)
+    QList<QToolButton*> icons_;
     QSlider* size_;
     QSlider* opacity_;
     QSlider* hardness_;
     QCheckBox* pressure_;
-    QLabel* sizeL_;
-    QLabel* opacityL_;
-    QLabel* hardnessL_;
+    QSpinBox* sizeV_;
+    QSpinBox* opacityV_;
+    QSpinBox* hardnessV_;
     void emitParams();
+    void syncIcons(int row);
 };
 
 // 레이어 스택

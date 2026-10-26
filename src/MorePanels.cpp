@@ -1,4 +1,8 @@
 #include "MorePanels.h"
+#include <QSignalBlocker>
+#include <QPixmap>
+#include <QToolButton>
+#include <QScrollArea>
 #include "CanvasWidget.h"
 #include "Document.h"
 
@@ -218,47 +222,68 @@ ShareManagerPanel::ShareManagerPanel(QWidget* parent) : QWidget(parent) {
 
 // ---------------------------------------------------------------- 브러시 패널
 BrushPanel::BrushPanel(QWidget* parent) : QWidget(parent) {
-    auto* lay = new QVBoxLayout(this);
+    auto* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    auto* body = new QWidget;
+    auto* lay = new QVBoxLayout(body);
     lay->setContentsMargins(4, 4, 4, 4);
-    list_ = new QListWidget;
-    list_->setViewMode(QListView::ListMode);
-    list_->setIconSize(QSize(150, 34));
-    list_->setUniformItemSizes(true);
-    lay->addWidget(list_);
-    rebuild();
-    list_->setCurrentRow(0);
-    connect(list_, &QListWidget::currentRowChanged, this, [this](int r) {
-        if (r >= 0) emit presetSelected(r);
-    });
+    lay->setSpacing(2);
+    scroll->setWidget(body);
+    outer->addWidget(scroll);
+
+    struct Group { const char* name; QList<int> items; };
+    const Group groups[] = {
+        {"펜 · 잉크", {0, 5, 6, 4, 14}},
+        {"연필 · 색연필", {1, 10, 11, 12}},
+        {"붓 · 수채", {7, 8, 9, 15}},
+        {"에어 · 스프레이", {3, 13, 17}},
+        {"도장", {16, 18, 19}},
+        {"지우개", {2, 20, 21}},
+    };
+    buttons_.fill(nullptr, brushPresetCount());
+    for (const Group& g : groups) {
+        auto* hdr = new QLabel(QString("  ◉  ") + QString::fromUtf8(g.name));
+        hdr->setStyleSheet("background:#3f3f3f;color:#b0b0b0;padding:2px 0;");
+        lay->addWidget(hdr);
+        auto* grid = new QGridLayout;
+        grid->setSpacing(2);
+        int k = 0;
+        for (int i : g.items) {
+            const BrushPreset& pr = brushPreset(i);
+            BrushParams p;
+            p.size = pr.size;
+            p.opacity = pr.opacity;
+            p.hardness = pr.hardness;
+            p.pressure = pr.pressure;
+            p.preset = i;
+            QImage st = brushPreview(p, pr.eraser ? QColor(0xe0, 0x70, 0x70) : QColor(0xee, 0xee, 0xee), QSize(56, 24));
+            auto* b = new QToolButton;
+            b->setIcon(QIcon(QPixmap::fromImage(st)));
+            b->setIconSize(QSize(56, 24));
+            b->setCheckable(true);
+            b->setAutoExclusive(true);
+            b->setFixedSize(60, 30);
+            b->setToolTip(QString::fromUtf8(pr.name));
+            connect(b, &QToolButton::clicked, this, [this, i] { emit presetSelected(i); });
+            grid->addWidget(b, k / 3, k % 3);
+            buttons_[i] = b;
+            ++k;
+        }
+        lay->addLayout(grid);
+    }
+    lay->addStretch();
+    if (buttons_[0]) buttons_[0]->setChecked(true);
 }
 
-void BrushPanel::rebuild() {
-    QSignalBlocker b(list_);
-    const int cur = list_->currentRow();
-    list_->clear();
-    const bool dark = palette().color(QPalette::Window).lightness() < 128;
-    for (int i = 0; i < brushPresetCount(); ++i) {
-        const BrushPreset& pr = brushPreset(i);
-        BrushParams p;
-        p.size = pr.size;
-        p.opacity = pr.opacity;
-        p.hardness = pr.hardness;
-        p.pressure = pr.pressure;
-        p.preset = i;
-        QImage strokeImg = brushPreview(p, pr.eraser ? QColor(0xe2, 0x4a, 0x4a) : (dark ? QColor(0xee, 0xee, 0xee) : color_), QSize(150, 34));
-        QImage bg(strokeImg.size(), QImage::Format_ARGB32_Premultiplied);
-        bg.fill(dark ? QColor(0x22, 0x25, 0x2b) : QColor(0xf6, 0xf6, 0xf6));
-        QPainter pp(&bg);
-        pp.drawImage(0, 0, strokeImg);
-        pp.end();
-        list_->addItem(new QListWidgetItem(QIcon(QPixmap::fromImage(bg)), QString::fromUtf8(pr.name)));
-    }
-    list_->setCurrentRow(cur < 0 ? 0 : cur);
-}
+void BrushPanel::rebuild() {}
 
 void BrushPanel::setCurrent(int row) {
-    QSignalBlocker b(list_);
-    list_->setCurrentRow(row);
+    if (row < 0 || row >= buttons_.size() || !buttons_[row]) return;
+    QSignalBlocker b(buttons_[row]);
+    buttons_[row]->setChecked(true);
 }
 
 void BrushPanel::setColor(const QColor& c) {

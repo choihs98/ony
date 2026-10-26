@@ -277,7 +277,7 @@ static void testClipsAndPlay(MainWindow& w) {
     // 재생 버튼(▶) 누르고 잠시 재생 (충돌 없이 프레임이 진행되는지)
     QToolButton* play = nullptr;
     for (auto* b : w.findChildren<QToolButton*>())
-        if (b->text() == "▶" && b->toolTip().contains("재생")) play = b;
+        if (b->toolTip().startsWith("재생 (Enter)")) play = b;
     CHECK(play != nullptr);
     if (play) {
         play->click();
@@ -285,7 +285,7 @@ static void testClipsAndPlay(MainWindow& w) {
         CHECK(d->currentFrame() > 0);
         QToolButton* stop = nullptr;
         for (auto* b : w.findChildren<QToolButton*>())
-            if (b->text() == "■") stop = b;
+            if (b->toolTip() == "정지") stop = b;
         if (stop) stop->click();
     }
     d->setCurrentFrame(0);

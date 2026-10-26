@@ -34,6 +34,7 @@ public:
     bool lightTable() const { return lightTable_; }
     void setCameraView(bool on);
     qreal zoom() const { return zoom_; }
+    void setBackdrop(const QColor& c) { backdrop_ = c; update(); }
 
     // 가이드라인 오버레이
     struct Guides {
@@ -91,6 +92,7 @@ protected:
     void resizeEvent(QResizeEvent*) override;
 
 private:
+    QColor backdrop_{0x2d, 0x31, 0x36};
     QPointF imageTopLeft() const;
     QPointF toImage(const QPointF& widgetPos) const;
 

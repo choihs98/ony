@@ -94,6 +94,6 @@ signals:
     void presetSelected(int row);
 private:
     void rebuild();
-    QListWidget* list_;
+    QList<class QToolButton*> buttons_;
     QColor color_{0x22, 0x22, 0x22};
 };

@@ -14,6 +14,7 @@ add_library(tvpcore STATIC
     src/Warp.h src/Warp.cpp
     src/Extras.h src/Extras.cpp
     src/Brush.h src/Brush.cpp
+    src/Style.h src/Style.cpp
 )
 target_include_directories(tvpcore PUBLIC src)
 target_link_libraries(tvpcore PUBLIC Qt6::Widgets)

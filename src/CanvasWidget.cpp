@@ -119,7 +119,7 @@ void CanvasWidget::resizeEvent(QResizeEvent* e) {
 // ---------------------------------------------------------------- 그리기(화면)
 void CanvasWidget::paintEvent(QPaintEvent*) {
     QPainter p(this);
-    p.fillRect(rect(), QColor(0x3a, 0x3a, 0x3a));
+    p.fillRect(rect(), backdrop_);
     if (cacheDirty_ || cache_.size() != doc_->size()) {
         cache_ = doc_->composite(doc_->currentFrame(), true, cameraView_);
         cacheDirty_ = false;

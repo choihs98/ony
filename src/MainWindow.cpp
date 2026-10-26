@@ -3,6 +3,7 @@
 #include "Document.h"
 #include "Extras.h"
 #include "Effects.h"
+#include "Style.h"
 #include "Panels.h"
 #include "TimelineWidget.h"
 #include "Warp.h"
@@ -37,7 +38,9 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSplitter>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QCursor>
 #include <QDateTime>
@@ -95,27 +98,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), doc_(new Document
 
 // ---------------------------------------------------------------- 테마
 void MainWindow::applyTheme(int index) {
-    struct Scheme { QColor window, base, text, button; };
-    static const Scheme schemes[] = {
-        {QColor(0x2a, 0x2d, 0x35), QColor(0x1f, 0x22, 0x2a), QColor(0xea, 0xec, 0xef), QColor(0x32, 0x36, 0x42)}, // 밤
-        {QColor(0x3a, 0x3d, 0x46), QColor(0x2c, 0x2f, 0x38), QColor(0xea, 0xec, 0xef), QColor(0x45, 0x49, 0x56)}, // 황혼
-        {QColor(0xe8, 0xe9, 0xed), QColor(0xff, 0xff, 0xff), QColor(0x1b, 0x1d, 0x22), QColor(0xf0, 0xf1, 0xf4)}, // 낮
-        {QColor(0xc9, 0xcb, 0xd2), QColor(0xe1, 0xe3, 0xe8), QColor(0x1b, 0x1d, 0x22), QColor(0xd3, 0xd5, 0xdb)}, // 새벽
-    };
-    const Scheme& s = schemes[std::clamp(index, 0, 3)];
-    QPalette p;
-    p.setColor(QPalette::Window, s.window);
-    p.setColor(QPalette::WindowText, s.text);
-    p.setColor(QPalette::Base, s.base);
-    p.setColor(QPalette::AlternateBase, s.base.darker(108));
-    p.setColor(QPalette::Text, s.text);
-    p.setColor(QPalette::Button, s.button);
-    p.setColor(QPalette::ButtonText, s.text);
-    p.setColor(QPalette::Highlight, QColor(0x4a, 0x90, 0xe2));
-    p.setColor(QPalette::HighlightedText, Qt::white);
-    p.setColor(QPalette::ToolTipBase, s.base);
-    p.setColor(QPalette::ToolTipText, s.text);
-    qApp->setPalette(p);
+    Style::apply(index);
+    if (canvas_) canvas_->setBackdrop(Style::scheme(index).canvasBg);
 }
 
 void MainWindow::preferencesDialog() {
@@ -137,7 +121,7 @@ void MainWindow::preferencesDialog() {
     auto* disp = new QWidget;
     auto* df = new QFormLayout(disp);
     auto* theme = new QComboBox;
-    theme->addItems({"밤 (기본)", "황혼", "낮", "새벽"});
+    for (int i = 0; i < Style::schemeCount(); ++i) theme->addItem(Style::schemeName(i));
     theme->setCurrentIndex(st.value("theme", 0).toInt());
     df->addRow("색상 테마", theme);
     tabs->addTab(disp, "화면");
@@ -185,7 +169,14 @@ void MainWindow::buildCentral() {
     lay->setContentsMargins(0, 0, 0, 0);
     lay->setSpacing(0);
 
+    // ---- 캔버스 위 정보줄 (TVPaint: 프로젝트 / 클립 / 확대율 / 각도 / 현재 레이어 / 현재 이미지)
+    canvasInfo_ = new QLabel;
+    canvasInfo_->setContentsMargins(8, 3, 8, 3);
+    canvasInfo_->setStyleSheet("color:#a8a8a8;");
+    lay->addWidget(canvasInfo_);
+
     canvas_ = new CanvasWidget(doc_);
+    canvas_->setBackdrop(Style::scheme(QSettings("Ony", "Ony").value("theme", 0).toInt()).canvasBg);
     lay->addWidget(canvas_, 1);
 
     // ---- 재생 바 (문서 순서: 소리, 반복, 카메라 보기, FPS, | 재생 컨트롤 | 재중앙) ----
@@ -193,9 +184,11 @@ void MainWindow::buildCentral() {
     auto* ph = new QHBoxLayout(pb);
     ph->setContentsMargins(6, 2, 6, 2);
     ph->setSpacing(3);
-    auto addBtn = [&](const QString& t, const QString& tip, auto fn, bool checkable = false) {
+    auto addBtn = [&](const QString& iconName, const QString& tip, auto fn, bool checkable = false) {
         auto* b = new QToolButton;
-        b->setText(t);
+        b->setIcon(Style::icon(iconName, 18));
+        b->setIconSize(QSize(18, 18));
+        b->setFixedSize(28, 24);
         b->setToolTip(tip);
         b->setCheckable(checkable);
         if (checkable) connect(b, &QToolButton::toggled, this, fn);
@@ -203,37 +196,50 @@ void MainWindow::buildCentral() {
         ph->addWidget(b);
         return b;
     };
-    soundBtn_ = addBtn("소리", "소리 켜기/끄기", [this](bool on) {
+    auto* markIn = new QToolButton;
+    markIn->setText(QStringLiteral("마크 인"));
+    markIn->setToolTip(QStringLiteral("현재 프레임을 반복 구간의 시작으로 지정"));
+    connect(markIn, &QToolButton::clicked, this, [this] {
+        const int cur = doc_->currentFrame();
+        const int b = (loopB_ >= cur) ? loopB_ : doc_->frameCount() - 1;
+        timeline_->setRange(cur, b);
+    });
+    ph->addWidget(markIn);
+    soundBtn_ = addBtn("sound", "소리 켜기/끄기", [this](bool on) {
         if (audioOut_) audioOut_->setMuted(!on);
     }, true);
     soundBtn_->setChecked(true);
-    loopBox_ = addBtn("반복", "반복 재생 / 한 번만 재생", [](bool) {}, true);
+    loopBox_ = addBtn("loop", "반복 재생 / 한 번만 재생", [](bool) {}, true);
     loopBox_->setChecked(true);
-    camViewBtn_ = addBtn("프레임", "카메라 보기로 재생", [this](bool on) {
+    camViewBtn_ = addBtn("camera", "카메라 보기로 재생", [this](bool on) {
         canvas_->setCameraView(on);
         if (camViewAct_ && camViewAct_->isChecked() != on) camViewAct_->setChecked(on);
     }, true);
-    ph->addWidget(new QLabel(QStringLiteral("FPS")));
     fpsSpin_ = new QSpinBox;
     fpsSpin_->setRange(1, 120);
     fpsSpin_->setValue(doc_->fps());
+    fpsSpin_->setSuffix(QStringLiteral(" fps"));
+    fpsSpin_->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    fpsSpin_->setFixedWidth(64);
     connect(fpsSpin_, &QSpinBox::valueChanged, this, [this](int v) { doc_->setFps(v); });
     ph->addWidget(fpsSpin_);
     scrubBtn_ = new QToolButton;
-    scrubBtn_->setText("✋");
+    scrubBtn_->setIcon(Style::icon("hand", 18));
+    scrubBtn_->setIconSize(QSize(18, 18));
+    scrubBtn_->setFixedSize(28, 24);
     scrubBtn_->setToolTip(QStringLiteral("누른 채 좌우로 끌면 재생 헤드를 부드럽게 이동 (놓으면 원위치)"));
     scrubBtn_->installEventFilter(this);
     ph->addWidget(scrubBtn_);
     ph->addStretch();
-    addBtn("▶", "재생 (Enter)", [this] {
+    addBtn("play", "재생 (Enter)", [this] {
         if (!playTimer_.isActive()) togglePlay();
     });
-    addBtn("■", "정지", [this] {
+    addBtn("stop", "정지", [this] {
         if (playTimer_.isActive()) togglePlay();
     });
-    addBtn("|◀", "첫 프레임", [this] { gotoFrame(0); });
-    addBtn("▶|", "마지막 프레임", [this] { gotoFrame(doc_->frameCount() - 1); });
-    addBtn("◀◆", "이전 이미지(키)", [this] {
+    addBtn("first", "첫 프레임", [this] { gotoFrame(0); });
+    addBtn("last", "마지막 프레임", [this] { gotoFrame(doc_->frameCount() - 1); });
+    addBtn("prevkey", "이전 이미지(키)", [this] {
         const int l = doc_->currentLayer(), f = doc_->currentFrame();
         int k = doc_->keyIndexAt(l, f);
         if (k >= 0 && k == f) {
@@ -243,25 +249,85 @@ void MainWindow::buildCentral() {
             if (p >= 0) gotoFrame(p);
         } else if (k >= 0) gotoFrame(k);
     });
-    addBtn("◆▶", "다음 이미지(키)", [this] {
+    addBtn("nextkey", "다음 이미지(키)", [this] {
         const int n = doc_->nextKeyIndex(doc_->currentLayer(), doc_->currentFrame());
         if (n >= 0) gotoFrame(n);
     });
-    addBtn("◀", "이전 프레임 (←)", [this] { gotoFrame(doc_->currentFrame() - 1); });
-    addBtn("▶", "다음 프레임 (→)", [this] { gotoFrame(doc_->currentFrame() + 1); });
+    addBtn("prev", "이전 프레임 (←)", [this] { gotoFrame(doc_->currentFrame() - 1); });
+    addBtn("next", "다음 프레임 (→)", [this] { gotoFrame(doc_->currentFrame() + 1); });
     ph->addStretch();
-    addBtn("⌖", "재생 헤드를 타임라인 중앙으로", [this] {
+    addBtn("center", "재생 헤드를 타임라인 중앙으로", [this] {
         const int x = TimelineWidget::kNameW + doc_->currentFrame() * TimelineWidget::kCell;
         tlScroll_->horizontalScrollBar()->setValue(x - tlScroll_->viewport()->width() / 2);
     });
-    loopModeBtn_ = addBtn("구간", "루프 모드: Shift+타임라인 위쪽 눈금을 끌어 구간 지정", [this](bool on) {
-        if (on && loopA_ < 0) {
-            statusBar()->showMessage(QStringLiteral("타임라인 위쪽 눈금을 Shift+드래그해서 구간을 지정하세요."), 4000);
-        }
-    }, true);
+    zoomLabel_ = new QLabel(QStringLiteral("100%"));
+    zoomLabel_->setMinimumWidth(56);
+    zoomLabel_->setAlignment(Qt::AlignCenter);
+    zoomLabel_->setStyleSheet("background:#35393a;border:1px solid #2c2c2c;padding:2px 4px;");
+    ph->addWidget(zoomLabel_);
+    loopModeBtn_ = new QToolButton;
+    loopModeBtn_->setText(QStringLiteral("구간"));
+    loopModeBtn_->setCheckable(true);
+    loopModeBtn_->setToolTip(QStringLiteral("루프 모드: Shift+타임라인 위쪽 눈금을 끌어 구간 지정"));
+    connect(loopModeBtn_, &QToolButton::toggled, this, [this](bool on) {
+        if (on && loopA_ < 0) statusBar()->showMessage(QStringLiteral("타임라인 위쪽 눈금을 Shift+드래그해서 구간을 지정하세요."), 4000);
+    });
+    ph->addWidget(loopModeBtn_);
+    auto* markOut = new QToolButton;
+    markOut->setText(QStringLiteral("마크 아웃"));
+    markOut->setToolTip(QStringLiteral("현재 프레임을 반복 구간의 끝으로 지정"));
+    connect(markOut, &QToolButton::clicked, this, [this] {
+        const int cur = doc_->currentFrame();
+        const int a = (loopA_ >= 0 && loopA_ <= cur) ? loopA_ : 0;
+        timeline_->setRange(a, cur);
+    });
+    ph->addWidget(markOut);
     lay->addWidget(pb);
 
-    // ---- 하단: 레이어 스택 | 타임라인 ----
+    scrub_ = new ScrubBar(doc_);
+    lay->addWidget(scrub_);
+
+    // ---- 타임라인 위 줄: 레이어 조작 + 프로젝트/클립/레이어 정보 ----
+    auto* strip = new QWidget;
+    auto* sh = new QHBoxLayout(strip);
+    sh->setContentsMargins(6, 2, 6, 2);
+    sh->setSpacing(3);
+    auto layerBtn = [&](const QString& t, const QString& tip, auto fn) {
+        auto* b = new QToolButton;
+        b->setText(t);
+        b->setToolTip(tip);
+        b->setMinimumWidth(b->fontMetrics().horizontalAdvance(t) + 14);
+        connect(b, &QToolButton::clicked, this, fn);
+        sh->addWidget(b);
+    };
+    layerBtn(QStringLiteral("새 레이어"), QStringLiteral("새 레이어"), [this] { doc_->addLayer(QString("레이어 %1").arg(doc_->layerCount() + 1)); });
+    layerBtn(QStringLiteral("복제"), QStringLiteral("레이어 복제"), [this] { doc_->duplicateLayer(doc_->currentLayer()); });
+    layerBtn(QStringLiteral("삭제"), QStringLiteral("레이어 삭제"), [this] { doc_->removeLayer(doc_->currentLayer()); });
+    layerBtn(QStringLiteral("▲"), QStringLiteral("레이어를 위로"), [this] { doc_->moveLayer(doc_->currentLayer(), +1); });
+    layerBtn(QStringLiteral("▼"), QStringLiteral("레이어를 아래로"), [this] { doc_->moveLayer(doc_->currentLayer(), -1); });
+    sh->addWidget(new QLabel(QStringLiteral("불투명도")));
+    layerOpacity_ = new QSlider(Qt::Horizontal);
+    layerOpacity_->setRange(0, 100);
+    layerOpacity_->setValue(100);
+    layerOpacity_->setFixedWidth(110);
+    sh->addWidget(layerOpacity_);
+    connect(layerOpacity_, &QSlider::valueChanged, this, [this](int v) {
+        doc_->layer(doc_->currentLayer()).opacity = v / 100.0;
+        doc_->notifyChanged();
+    });
+    infoProject_ = new QLabel;
+    infoClip_ = new QLabel;
+    infoLayer_ = new QLabel;
+    infoImage_ = new QLabel;
+    for (QLabel* l : {infoProject_, infoClip_, infoLayer_}) l->setStyleSheet("color:#a8a8a8;");
+    sh->addSpacing(12);
+    sh->addWidget(infoProject_);
+    sh->addWidget(infoClip_);
+    sh->addWidget(infoLayer_);
+    sh->addStretch();
+    lay->addWidget(strip);
+
+    // ---- 하단: 타임라인 (레이어 머리글 + 프레임 칸) ----
     timeline_ = new TimelineWidget(doc_);
     tlScroll_ = new QScrollArea;
     tlScroll_->setWidget(timeline_);
@@ -269,16 +335,37 @@ void MainWindow::buildCentral() {
     tlScroll_->setFrameShape(QFrame::NoFrame);
     auto* split = new QSplitter(Qt::Horizontal);
     bottomSplit_ = split;
-    split->addWidget(new LayerStackPanel(doc_));
     split->addWidget(tlScroll_);
-    split->setStretchFactor(0, 0);
-    split->setStretchFactor(1, 1);
-    split->setSizes({260, 1000});
-    split->setMinimumHeight(170);
-    split->setMaximumHeight(280);
+    split->setMinimumHeight(150);
+    split->setMaximumHeight(460);
     lay->addWidget(split);
 
-    // ---- 정보 바 (문서 순서: 펜 좌표, 색, 프록시, 프로젝트, 클립, 레이어, 현재 이미지) ----
+    // ---- 타임라인 아래 줄: 노트 / 소리 ----
+    auto* tabsRow = new QWidget;
+    auto* th = new QHBoxLayout(tabsRow);
+    th->setContentsMargins(6, 2, 6, 2);
+    th->setSpacing(3);
+    auto tabBtn = [&](const QString& t, const QString& tip, auto fn) {
+        auto* b = new QToolButton;
+        b->setText(t);
+        b->setToolTip(tip);
+        b->setMinimumWidth(b->fontMetrics().horizontalAdvance(t) + 22);
+        connect(b, &QToolButton::clicked, this, fn);
+        th->addWidget(b);
+    };
+    tabBtn(QStringLiteral("노트"), QStringLiteral("스토리보드/노트 패널 열기"), [this] {
+        dockStory_->show();
+        dockStory_->raise();
+    });
+    tabBtn(QStringLiteral("소리"), QStringLiteral("소리 파일 불러오기"), [this] { loadAudio(); });
+    tabBtn(QStringLiteral("타임시트"), QStringLiteral("타임시트 패널 열기"), [this] {
+        dockTimesheet_->show();
+        dockTimesheet_->raise();
+    });
+    th->addStretch();
+    lay->addWidget(tabsRow);
+
+    // ---- 정보 바 (TVPaint: 좌표 · 색 · 프록시 · … · 룸) ----
     auto* info = new QWidget;
     auto* ih = new QHBoxLayout(info);
     ih->setContentsMargins(6, 2, 6, 2);
@@ -286,16 +373,12 @@ void MainWindow::buildCentral() {
     infoCoord_ = new QLabel;
     infoColor_ = new QLabel;
     auto* proxy = new QComboBox;
-    proxy->addItems({"프록시: 끔", "프록시: 1/2", "프록시: 1/4"});
+    proxy->addItems({"프록시: 100%", "프록시: 50%", "프록시: 25%"});
     proxy->setToolTip(QStringLiteral("프록시: 재생 중 낮은 해상도로 합성해 속도를 높입니다"));
     connect(proxy, &QComboBox::currentIndexChanged, this, [this](int i) { setProxyChoice(i); });
-    infoProject_ = new QLabel;
-    infoClip_ = new QLabel;
-    infoLayer_ = new QLabel;
-    infoImage_ = new QLabel;
-    for (QWidget* w : {static_cast<QWidget*>(infoCoord_), static_cast<QWidget*>(infoColor_), static_cast<QWidget*>(proxy),
-                       static_cast<QWidget*>(infoProject_), static_cast<QWidget*>(infoClip_), static_cast<QWidget*>(infoLayer_)})
-        ih->addWidget(w);
+    ih->addWidget(infoCoord_);
+    ih->addWidget(infoColor_);
+    ih->addWidget(proxy);
     ih->addStretch();
     ih->addWidget(infoImage_);
     auto* house = new QToolButton;
@@ -320,6 +403,7 @@ void MainWindow::buildCentral() {
     connect(timeline_, &TimelineWidget::rangeChanged, this, [this](int a, int b) {
         loopA_ = a;
         loopB_ = b;
+        scrub_->setRange(a, b);
         if (a >= 0 && loopModeBtn_) loopModeBtn_->setChecked(true);
     });
     connect(canvas_, &CanvasWidget::cursorMoved, this, [this](int x, int y) {
@@ -331,6 +415,10 @@ void MainWindow::buildCentral() {
     connect(canvas_, &CanvasWidget::message, this, [this](const QString& m) { statusBar()->showMessage(m, 3000); });
     connect(doc_, &Document::changed, this, [this] { hoverCacheValid_ = false; });
     connect(doc_, &Document::currentChanged, this, [this] { hoverCacheValid_ = false; });
+    connect(doc_, &Document::currentChanged, this, [this] {
+        QSignalBlocker b(layerOpacity_);
+        layerOpacity_->setValue(int(doc_->layer(doc_->currentLayer()).opacity * 100 + 0.5));
+    });
     connect(canvas_, &CanvasWidget::strokeFinished, this, [this] {
         HistEntry e{canvas_->tool(), brushRow_, canvas_->brush(), canvas_->colorA()};
         if (!history_.isEmpty()) {
@@ -368,7 +456,7 @@ void MainWindow::buildDocks() {
     resizeDocks({dockMain_, dockColor_, dockTool_}, {250, 200, 330}, Qt::Vertical);
 
     brushPanel_ = new BrushPanel;
-    dockBrush_ = makeDock("브러시 패널", brushPanel_, Qt::RightDockWidgetArea);
+    dockBrush_ = makeDock("도구 프리셋", brushPanel_, Qt::RightDockWidgetArea);
     dockLibrary_ = makeDock("라이브러리", new LibraryPanel(doc_), Qt::RightDockWidgetArea);
     dockTimesheet_ = makeDock("타임시트", new TimesheetPanel(doc_), Qt::RightDockWidgetArea);
     dockFx_ = makeDock("FX 스택", new FxPanel(doc_), Qt::RightDockWidgetArea);
@@ -457,6 +545,7 @@ void MainWindow::buildDocks() {
     connect(tool_, &ToolPanel::brushSelected, this, [this](int row) {
         using T = CanvasWidget::Tool;
         brushRow_ = row;
+        dockTool_->setWindowTitle(QString("도구 : %1").arg(QString::fromUtf8(brushPreset(row).name)));
         canvas_->setTool(brushPreset(row).eraser ? T::Eraser : T::Pen);
         if (brushPanel_) brushPanel_->setCurrent(row);
     });
@@ -877,59 +966,83 @@ void MainWindow::buildMenus() {
         QMessageBox::about(this, "정보", "Ony — 키 이미지(원화) 중심의 2D 프레임 애니메이션 도구 (개발 중)");
     });
 
-    // 메뉴 아래 단축 아이콘 줄 (문서 순서: 파일 | 편집 | 패널 토글 | 도움말)
+    // 메뉴 아래 단축 아이콘 줄 (문서 순서: 파일 | 편집 | 패널 토글 | 도움말) + 클립 탭
     auto* tb = addToolBar("단축");
     tb->setObjectName("단축");
     tb->setMovable(false);
-    auto tbAct = [&](const QString& t, const QString& tip, auto fn) {
-        QAction* a = tb->addAction(t);
+    tb->setIconSize(QSize(22, 22));
+    tb->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    auto tbAct = [&](const QString& icon, const QString& tip, auto fn) {
+        QAction* a = tb->addAction(Style::icon(icon, 22), tip);
         a->setToolTip(tip);
         connect(a, &QAction::triggered, this, fn);
     };
-    tbAct("새로", "새 프로젝트", [this] { newProjectDialog(); });
-    tbAct("열기", "프로젝트 열기", [this] { openProject(); });
-    tbAct("저장", "프로젝트 저장", [this] { saveProject(); });
+    tbAct("new", "새 프로젝트", [this] { newProjectDialog(); });
+    tbAct("open", "프로젝트 열기", [this] { openProject(); });
+    tbAct("save", "프로젝트 저장", [this] { saveProject(); });
     tb->addSeparator();
-    undo->setText("실행 취소");
-    redo->setText("다시 실행");
+    undo->setIcon(Style::icon("undo", 22));
+    redo->setIcon(Style::icon("redo", 22));
+    undo->setToolTip(QStringLiteral("실행 취소 (Ctrl+Z)"));
+    redo->setToolTip(QStringLiteral("다시 실행 (Ctrl+Y)"));
     tb->addAction(undo);
     tb->addAction(redo);
     tb->addSeparator();
-    addDockToggle(tb, dockMain_, "메인", "메인 패널");
-    addDockToggle(tb, dockColor_, "색상", "색상 패널 (P)");
-    addDockToggle(tb, dockTool_, "도구", "도구 패널 (Shift+A)");
+    addDockToggle(tb, dockMain_, "transform", "메인 패널");
+    addDockToggle(tb, dockColor_, "palette", "색상 패널 (P)");
+    addDockToggle(tb, dockTool_, "pen", "도구 패널 (Shift+A)");
+    addDockToggle(tb, dockBrush_, "brush", "도구 프리셋 패널");
     {
-        QAction* a = tb->addAction("타임라인");
+        QAction* a = tb->addAction(Style::icon("timeline", 22), "타임라인");
         a->setCheckable(true);
         a->setChecked(true);
         a->setToolTip(QStringLiteral("타임라인과 레이어 스택 (0)"));
         connect(a, &QAction::toggled, this, [this](bool on) { bottomSplit_->setVisible(on); });
         timelineToggle_ = a;
     }
-    addDockToggle(tb, dockLight_, "라이트", "라이트 테이블 패널");
-    addDockToggle(tb, dockRemote_, "리모컨", "리모컨 패널");
-    addDockToggle(tb, dockNavigator_, "내비", "내비게이터 패널");
-    addDockToggle(tb, dockFx_, "FX", "FX 스택");
-    addDockToggle(tb, dockLibrary_, "라이브러리", "이미지 라이브러리");
-    addDockToggle(tb, dockGuides_, "가이드", "가이드라인 패널");
-    addDockToggle(tb, dockShare_, "공유", "공유 관리자");
+    addDockToggle(tb, dockLight_, "light", "라이트 테이블 패널");
+    addDockToggle(tb, dockRemote_, "remote", "리모컨 패널");
+    addDockToggle(tb, dockNavigator_, "navigator", "내비게이터 패널");
+    addDockToggle(tb, dockFx_, "fx", "FX 스택");
+    addDockToggle(tb, dockLibrary_, "library", "이미지 라이브러리");
+    addDockToggle(tb, dockGuides_, "guides", "가이드라인 패널");
+    addDockToggle(tb, dockShare_, "share", "공유 관리자");
     tb->addSeparator();
+    // 클립 탭 (TVPaint 의 문서 탭 자리)
+    clipTabs_ = new QTabBar;
+    clipTabs_->setDrawBase(false);
+    clipTabs_->setExpanding(false);
+    clipTabs_->setToolTip(QStringLiteral("클립 전환 (더블클릭: 이름 변경)"));
+    clipTabs_->installEventFilter(this);
+    connect(clipTabs_, &QTabBar::currentChanged, this, [this](int i) {
+        if (i >= 0 && i != clipIdx_) switchClip(i);
+    });
+    tb->addWidget(clipTabs_);
+    auto* addTab = new QToolButton;
+    addTab->setIcon(Style::icon("plus", 18));
+    addTab->setToolTip(QStringLiteral("새 클립"));
+    connect(addTab, &QToolButton::clicked, this, [this] { newClip(); });
+    tb->addWidget(addTab);
+    auto* spacer = new QWidget;
+    spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    tb->addWidget(spacer);
     auto* helpSearch = new QLineEdit;
     helpSearch->setPlaceholderText(QStringLiteral("? 매뉴얼 검색"));
-    helpSearch->setMaximumWidth(180);
+    helpSearch->setMaximumWidth(160);
     connect(helpSearch, &QLineEdit::returnPressed, this, [helpSearch] {
         const QString q = helpSearch->text().trimmed();
         if (!q.isEmpty()) QDesktopServices::openUrl(QUrl("https://doc.tvpaint.com/search?q=" + QUrl::toPercentEncoding(q)));
     });
     tb->addWidget(helpSearch);
+    syncClipTabs();
 
     new QShortcut(QKeySequence(Qt::Key_0), this, [this] { timelineToggle_->toggle(); });
     new QShortcut(QKeySequence(Qt::Key_P), this, [this] { dockColor_->setVisible(!dockColor_->isVisible()); });
     new QShortcut(QKeySequence("Shift+A"), this, [this] { dockTool_->setVisible(!dockTool_->isVisible()); });
 }
 
-void MainWindow::addDockToggle(QToolBar* tb, QDockWidget* dock, const QString& text, const QString& tip) {
-    QAction* a = tb->addAction(text);
+void MainWindow::addDockToggle(QToolBar* tb, QDockWidget* dock, const QString& iconName, const QString& tip) {
+    QAction* a = tb->addAction(Style::icon(iconName, 22), tip);
     a->setCheckable(true);
     a->setChecked(dock->isVisible());
     a->setToolTip(tip);
@@ -1303,10 +1416,24 @@ void MainWindow::updateInfo() {
                             .arg(first < 0 ? QStringLiteral("비어 있음") : QString("%1–%2").arg(first + 1).arg(last + 1))
                             .arg(cnt));
     infoImage_->setText(QString("이미지 %1").arg(doc_->currentFrame() + 1));
+    const QString projName = doc_->path().isEmpty() ? QStringLiteral("이름 없음") : QFileInfo(doc_->path()).completeBaseName();
+    syncClipTabs();
+    canvasInfo_->setText(QString("프로젝트: \"%1\"  클립: \"%2\"  %3%  0°  현재 레이어: \"%4\"  현재 이미지: %5%6")
+                             .arg(projName, clipNames_[clipIdx_])
+                             .arg(canvas_->zoom() * 100.0, 0, 'f', 2)
+                             .arg(doc_->layer(l).name)
+                             .arg(doc_->currentFrame() + 1)
+                             .arg(doc_->path().isEmpty() ? QString() : QString("  (%1)").arg(QDir::toNativeSeparators(doc_->path()))));
+    zoomLabel_->setText(QString("%1%").arg(canvas_->zoom() * 100.0, 0, 'f', 2));
 }
 
 // ---------------------------------------------------------------- 스크럽(손) / 서랍 자동 숨김
 bool MainWindow::eventFilter(QObject* o, QEvent* e) {
+    if (o == clipTabs_ && e->type() == QEvent::MouseButtonDblClick) {
+        renameClip();
+        syncClipTabs();
+        return true;
+    }
     if (o == scrubBtn_) {
         if (e->type() == QEvent::MouseButtonPress) {
             scrubActive_ = true;
@@ -1506,6 +1633,17 @@ void MainWindow::switchClip(int idx) {
     updateInfo();
     updateTitle();
     canvas_->zoomFit();
+}
+
+void MainWindow::syncClipTabs() {
+    if (!clipTabs_) return;
+    bool same = clipTabs_->count() == clipNames_.size() && clipTabs_->currentIndex() == clipIdx_;
+    for (int i = 0; same && i < clipNames_.size(); ++i) same = clipTabs_->tabText(i) == clipNames_[i];
+    if (same) return;
+    QSignalBlocker b(clipTabs_);
+    while (clipTabs_->count()) clipTabs_->removeTab(0);
+    for (const QString& n : clipNames_) clipTabs_->addTab(n);
+    clipTabs_->setCurrentIndex(clipIdx_);
 }
 
 void MainWindow::newClip() {
