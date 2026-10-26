@@ -1,0 +1,52 @@
+name: Windows 설치 파일 빌드
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Qt 설치
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.1"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtmultimedia
+          cache: true
+
+      - name: MSVC 환경
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: 빌드
+        shell: cmd
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: 배포 폴더 구성
+        shell: cmd
+        run: |
+          mkdir dist
+          copy build\ony.exe dist\
+          windeployqt --release --no-translations dist\ony.exe
+
+      - name: Inno Setup 설치 파일 생성
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $iscc = Get-ChildItem "C:\Program Files (x86)","C:\Program Files" -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          & $iscc.FullName installer\ony.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: 결과 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ony-Setup
+          path: release/Ony-Setup.exe
