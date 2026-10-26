@@ -1,5 +1,13 @@
 #include <algorithm>
 #include "MorePanels.h"
+#include <QHash>
+#include <QTimer>
+#include <QSettings>
+#include <QMessageBox>
+#include <QInputDialog>
+#include <QFormLayout>
+#include <QComboBox>
+#include <QColorDialog>
 #include <QSignalBlocker>
 #include <QPixmap>
 #include <QToolButton>
@@ -148,38 +156,344 @@ GuidelinesPanel::GuidelinesPanel(CanvasWidget* canvas, QWidget* parent) : QWidge
 
 // ---------------------------------------------------------------- 라이트 테이블
 LightTablePanel::LightTablePanel(CanvasWidget* canvas, QWidget* parent) : QWidget(parent) {
+    using P = CanvasWidget::LightTableParams;
     auto* lay = new QVBoxLayout(this);
     lay->setContentsMargins(6, 6, 6, 6);
-    auto* on = new QCheckBox(QStringLiteral("라이트 테이블 켜기 (L)"));
+    lay->setSpacing(6);
+    auto* on = new QCheckBox(QStringLiteral("라이트 테이블 켜기"));
     on->setChecked(canvas->lightTable());
-    auto* prev = new QSpinBox; prev->setRange(0, 8); prev->setValue(1);
-    auto* next = new QSpinBox; next->setRange(0, 8); next->setValue(1);
-    auto* op = new QSlider(Qt::Horizontal); op->setRange(5, 100); op->setValue(35);
-    auto row = [&](const QString& t, QWidget* w) {
-        auto* h = new QHBoxLayout;
-        h->addWidget(new QLabel(t));
-        h->addWidget(w, 1);
-        lay->addLayout(h);
-    };
     lay->addWidget(on);
-    row(QStringLiteral("이전 이미지 수 (빨강)"), prev);
-    row(QStringLiteral("다음 이미지 수 (파랑)"), next);
-    row(QStringLiteral("불투명도"), op);
+
+    auto* mode = new QComboBox;
+    mode->addItems({"인스턴스 모드 (이미지가 시작되는 프레임만)", "프레임 모드 (모든 프레임)", "북마크 모드 (북마크한 프레임)", "이미지 마크 모드 (마크한 이미지)"});
+    auto* colorMode = new QComboBox;
+    colorMode->addItems({"색 입히기", "원래 색", "그라데이션 (멀수록 옅게)"});
+    auto* prevCol = new QPushButton;
+    auto* nextCol = new QPushButton;
+    prevCol->setFixedSize(34, 22);
+    nextCol->setFixedSize(34, 22);
+    prevCol->setToolTip("이전 이미지 색");
+    nextCol->setToolTip("다음 이미지 색");
+    auto* form = new QFormLayout;
+    form->addRow("표시 방식", mode);
+    auto* ch = new QHBoxLayout;
+    ch->addWidget(colorMode, 1);
+    ch->addWidget(new QLabel("이전"));
+    ch->addWidget(prevCol);
+    ch->addWidget(new QLabel("다음"));
+    ch->addWidget(nextCol);
+    form->addRow("색", ch);
+    lay->addLayout(form);
+
+    // 이전 8칸 | 현재 | 다음 8칸 : 거리별 불투명도 슬라이더 (0 = 끔)
+    auto* sl = new QHBoxLayout;
+    sl->setSpacing(2);
+    QList<QSlider*> sliders; // [0..7] = 이전(가까운 것부터), [8..15] = 다음
+    auto mkSlider = [&](int dist, bool isPrev) {
+        auto* col = new QVBoxLayout;
+        auto* s = new QSlider(Qt::Vertical);
+        s->setRange(0, 100);
+        s->setFixedHeight(84);
+        s->setToolTip(QString("%1 %2번째 이미지").arg(isPrev ? "이전" : "다음").arg(dist + 1));
+        auto* t = new QLabel(QString::number(isPrev ? -(dist + 1) : dist + 1));
+        t->setAlignment(Qt::AlignCenter);
+        QFont f = t->font();
+        f.setPointSizeF(f.pointSizeF() - 1.5);
+        t->setFont(f);
+        col->addWidget(s, 1, Qt::AlignHCenter);
+        col->addWidget(t);
+        sl->addLayout(col);
+        return s;
+    };
+    // 왼쪽부터 먼 이전 이미지(-8) ... 가까운 이전 이미지(-1) 순서로 만들고, 거리 순서(가까운 것이 0번)로 저장한다
+    for (int i = P::kSlots - 1; i >= 0; --i) sliders.prepend(mkSlider(i, true));
+    QList<QSlider*> prevS = sliders, nextS(P::kSlots);
+    {
+        auto* zero = new QLabel("0");
+        zero->setAlignment(Qt::AlignHCenter | Qt::AlignBottom);
+        sl->addWidget(zero);
+    }
+    for (int i = 0; i < P::kSlots; ++i) nextS[i] = mkSlider(i, false);
+    lay->addLayout(sl);
+
+    auto* link = new QCheckBox("슬라이더 함께 움직이기");
+    auto* front = new QCheckBox("현재 그림 위에 표시");
+    auto* all = new QCheckBox("보이는 모든 레이어에 적용");
+    lay->addWidget(link);
+    lay->addWidget(front);
+    lay->addWidget(all);
+    auto* btns = new QHBoxLayout;
+    auto* reset = new QPushButton("초기화");
+    auto* save = new QPushButton("설정 저장");
+    auto* load = new QPushButton("설정 불러오기");
+    btns->addWidget(reset);
+    btns->addWidget(save);
+    btns->addWidget(load);
+    lay->addLayout(btns);
     lay->addStretch();
+
+    auto colorStyle = [](QPushButton* b, const QColor& c) { b->setStyleSheet(QString("background:%1;border:1px solid #222;").arg(c.name())); };
+    auto readParams = [=] {
+        P p;
+        p.mode = mode->currentIndex();
+        p.colorMode = colorMode->currentIndex();
+        p.prevColor = prevCol->property("c").value<QColor>();
+        p.nextColor = nextCol->property("c").value<QColor>();
+        for (int i = 0; i < P::kSlots; ++i) {
+            p.prevOp[i] = prevS[i]->value();
+            p.nextOp[i] = nextS[i]->value();
+        }
+        p.blendToFront = front->isChecked();
+        p.allLayers = all->isChecked();
+        return p;
+    };
+    auto showParams = [=](const P& p) {
+        QSignalBlocker b1(mode), b2(colorMode), b3(front), b4(all);
+        mode->setCurrentIndex(p.mode);
+        colorMode->setCurrentIndex(p.colorMode);
+        prevCol->setProperty("c", p.prevColor);
+        nextCol->setProperty("c", p.nextColor);
+        colorStyle(prevCol, p.prevColor);
+        colorStyle(nextCol, p.nextColor);
+        front->setChecked(p.blendToFront);
+        all->setChecked(p.allLayers);
+        for (int i = 0; i < P::kSlots; ++i) {
+            QSignalBlocker s1(prevS[i]), s2(nextS[i]);
+            prevS[i]->setValue(p.prevOp[i]);
+            nextS[i]->setValue(p.nextOp[i]);
+        }
+    };
+    auto push = [=] {
+        const P p = readParams();
+        canvas->setLightTableParams(p);
+        QSettings st("Ony", "Ony");
+        st.beginGroup("lightTable/current");
+        st.setValue("mode", p.mode);
+        st.setValue("colorMode", p.colorMode);
+        st.setValue("prevColor", p.prevColor);
+        st.setValue("nextColor", p.nextColor);
+        QStringList po, no;
+        for (int i = 0; i < P::kSlots; ++i) { po << QString::number(p.prevOp[i]); no << QString::number(p.nextOp[i]); }
+        st.setValue("prevOp", po);
+        st.setValue("nextOp", no);
+        st.setValue("front", p.blendToFront);
+        st.setValue("all", p.allLayers);
+    };
+    auto fromSettings = [=](const QString& group) {
+        QSettings st("Ony", "Ony");
+        st.beginGroup(group);
+        P p;
+        p.mode = st.value("mode", p.mode).toInt();
+        p.colorMode = st.value("colorMode", p.colorMode).toInt();
+        p.prevColor = st.value("prevColor", p.prevColor).value<QColor>();
+        p.nextColor = st.value("nextColor", p.nextColor).value<QColor>();
+        const QStringList po = st.value("prevOp").toStringList(), no = st.value("nextOp").toStringList();
+        for (int i = 0; i < P::kSlots; ++i) {
+            if (i < po.size()) p.prevOp[i] = po[i].toInt();
+            if (i < no.size()) p.nextOp[i] = no[i].toInt();
+        }
+        p.blendToFront = st.value("front", false).toBool();
+        p.allLayers = st.value("all", false).toBool();
+        return p;
+    };
+    showParams(fromSettings("lightTable/current"));
+    canvas->setLightTableParams(readParams());
+
     connect(on, &QCheckBox::toggled, this, [this, canvas](bool v) {
         canvas->setLightTable(v);
         emit enabledChanged(v);
     });
-    auto apply = [=] {
-        CanvasWidget::LightTableParams p;
-        p.prev = prev->value();
-        p.next = next->value();
-        p.opacity = op->value();
-        canvas->setLightTableParams(p);
+    connect(mode, &QComboBox::currentIndexChanged, this, push);
+    connect(colorMode, &QComboBox::currentIndexChanged, this, push);
+    connect(front, &QCheckBox::toggled, this, push);
+    connect(all, &QCheckBox::toggled, this, push);
+    auto pickColor = [=](QPushButton* b) {
+        const QColor c = QColorDialog::getColor(b->property("c").value<QColor>(), this, "라이트 테이블 색");
+        if (!c.isValid()) return;
+        b->setProperty("c", c);
+        colorStyle(b, c);
+        push();
     };
-    connect(prev, &QSpinBox::valueChanged, this, apply);
-    connect(next, &QSpinBox::valueChanged, this, apply);
-    connect(op, &QSlider::valueChanged, this, apply);
+    connect(prevCol, &QPushButton::clicked, this, [=] { pickColor(prevCol); });
+    connect(nextCol, &QPushButton::clicked, this, [=] { pickColor(nextCol); });
+    // 슬라이더: 링크가 켜져 있으면 모든 슬라이더가 같은 비율로 함께 움직인다
+    auto all16 = QList<QSlider*>();
+    all16 << prevS << nextS;
+    auto* busy = new bool(false);
+    for (QSlider* s : all16) {
+        auto* last = new int(s->value());
+        connect(s, &QSlider::valueChanged, this, [=](int v) {
+            if (link->isChecked() && !*busy) {
+                *busy = true;
+                const int diff = v - *last;
+                for (QSlider* o : all16)
+                    if (o != s) o->setValue(std::clamp(o->value() + diff, 0, 100));
+                *busy = false;
+            }
+            *last = v;
+            if (!*busy) push();
+        });
+    }
+    connect(reset, &QPushButton::clicked, this, [=] {
+        showParams(P());
+        push();
+    });
+    connect(save, &QPushButton::clicked, this, [=] {
+        bool ok = false;
+        const QString n = QInputDialog::getText(this, "라이트 테이블 설정 저장", "이름:", QLineEdit::Normal, "내 설정", &ok);
+        if (!ok || n.trimmed().isEmpty()) return;
+        push();
+        QSettings st("Ony", "Ony");
+        st.beginGroup("lightTable/current");
+        const QStringList keys = st.allKeys();
+        QVariantMap vals;
+        for (const QString& k : keys) vals[k] = st.value(k);
+        st.endGroup();
+        st.beginGroup("lightTable/presets/" + n.trimmed());
+        for (auto it = vals.cbegin(); it != vals.cend(); ++it) st.setValue(it.key(), it.value());
+    });
+    connect(load, &QPushButton::clicked, this, [=] {
+        QSettings st("Ony", "Ony");
+        st.beginGroup("lightTable/presets");
+        const QStringList names = st.childGroups();
+        st.endGroup();
+        if (names.isEmpty()) {
+            QMessageBox::information(this, "라이트 테이블", "저장된 설정이 없습니다.");
+            return;
+        }
+        bool ok = false;
+        const QString n = QInputDialog::getItem(this, "라이트 테이블 설정 불러오기", "설정:", names, 0, false, &ok);
+        if (!ok) return;
+        showParams(fromSettings("lightTable/presets/" + n));
+        push();
+    });
+}
+
+// ---------------------------------------------------------------- 플립 패널
+FlipPanel::FlipPanel(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) {
+    setMinimumSize(220, 220);
+    setMouseTracking(false);
+    auto* lay = new QVBoxLayout(this);
+    lay->setContentsMargins(6, 6, 6, 6);
+    lay->addStretch(1); // 위쪽은 미리보기 그림
+    auto* row1 = new QHBoxLayout;
+    from_ = new QSpinBox;
+    to_ = new QSpinBox;
+    from_->setRange(1, doc_->frameCount());
+    to_->setRange(1, doc_->frameCount());
+    from_->setValue(1);
+    to_->setValue(doc_->frameCount());
+    row1->addWidget(new QLabel("범위"));
+    row1->addWidget(from_);
+    row1->addWidget(new QLabel("~"));
+    row1->addWidget(to_);
+    lay->addLayout(row1);
+    auto* row2 = new QHBoxLayout;
+    fps_ = new QSpinBox;
+    fps_->setRange(1, 120);
+    fps_->setValue(doc_->fps());
+    fps_->setSuffix(" fps");
+    mode_ = new QComboBox;
+    mode_->addItems({"반복", "왕복", "한 번"});
+    play_ = new QPushButton("플립");
+    play_->setCheckable(true);
+    row2->addWidget(fps_);
+    row2->addWidget(mode_);
+    row2->addWidget(play_);
+    lay->addLayout(row2);
+    timer_ = new QTimer(this);
+    connect(timer_, &QTimer::timeout, this, [this] { tick(); });
+    connect(fps_, &QSpinBox::valueChanged, this, [this](int v) { timer_->setInterval(1000 / std::max(1, v)); });
+    timer_->setInterval(1000 / std::max(1, doc_->fps()));
+    connect(play_, &QPushButton::toggled, this, [this](bool on) {
+        play_->setText(on ? "정지" : "플립");
+        if (on) {
+            flipFrame_ = doc_->currentFrame();
+            dir_ = 1;
+            timer_->start();
+        } else {
+            timer_->stop();
+        }
+    });
+    connect(doc_, &Document::currentChanged, this, [this] {
+        if (!timer_->isActive()) flipFrame_ = doc_->currentFrame();
+        update();
+    });
+    connect(doc_, &Document::structureChanged, this, [this] {
+        cache_.clear();
+        from_->setMaximum(doc_->frameCount());
+        to_->setMaximum(doc_->frameCount());
+        update();
+    });
+    connect(doc_, &Document::changed, this, [this] { cache_.clear(); update(); });
+}
+
+QRect FlipPanel::previewRect() const {
+    const QRect avail(6, 6, width() - 12, height() - 6 - 74);
+    if (avail.width() < 20 || avail.height() < 20) return QRect();
+    const QSize s = doc_->size().scaled(avail.size(), Qt::KeepAspectRatio);
+    return QRect(QPoint(avail.x() + (avail.width() - s.width()) / 2, avail.y()), s);
+}
+
+QImage FlipPanel::frameImage(int f) {
+    if (!cache_.contains(f)) {
+        if (cache_.size() > 96) cache_.clear();
+        const QSize box(360, 360);
+        QImage full = doc_->composite(f, true, false);
+        cache_.insert(f, full.size().width() > box.width() ? full.scaled(box, Qt::KeepAspectRatio, Qt::SmoothTransformation) : full);
+    }
+    return cache_.value(f);
+}
+
+void FlipPanel::tick() {
+    const int a = std::min(from_->value(), to_->value()) - 1;
+    const int b = std::max(from_->value(), to_->value()) - 1;
+    int next = flipFrame_ + dir_;
+    if (next > b) {
+        if (mode_->currentIndex() == 0) next = a;
+        else if (mode_->currentIndex() == 1) { dir_ = -1; next = std::max(a, b - 1); }
+        else { play_->setChecked(false); return; }
+    } else if (next < a) {
+        dir_ = 1;
+        next = std::min(b, a + 1);
+    }
+    flipFrame_ = std::clamp(next, 0, doc_->frameCount() - 1);
+    update();
+}
+
+void FlipPanel::paintEvent(QPaintEvent*) {
+    QPainter p(this);
+    const QRect r = previewRect();
+    if (r.isEmpty()) return;
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    p.drawImage(r, frameImage(std::clamp(flipFrame_, 0, doc_->frameCount() - 1)));
+    p.setPen(palette().color(QPalette::WindowText));
+    p.drawRect(r.adjusted(0, 0, -1, -1));
+    // 아래쪽 진행 막대 (클릭/드래그로 프레임 넘기기)
+    const QRect bar(r.left(), r.bottom() + 4, r.width(), 8);
+    p.fillRect(bar, QColor(0, 0, 0, 90));
+    const int n = std::max(1, doc_->frameCount() - 1);
+    const int x = bar.left() + int(double(flipFrame_) / n * bar.width());
+    p.fillRect(QRect(x - 2, bar.top() - 2, 5, bar.height() + 4), palette().color(QPalette::Highlight));
+    p.drawText(QRect(r.left(), bar.bottom() + 2, r.width(), 16), Qt::AlignCenter, QString("프레임 %1 / %2").arg(flipFrame_ + 1).arg(doc_->frameCount()));
+}
+
+void FlipPanel::scrubTo(const QPoint& pos) {
+    const QRect r = previewRect();
+    if (r.isEmpty()) return;
+    const double t = std::clamp(double(pos.x() - r.left()) / std::max(1, r.width()), 0.0, 1.0);
+    const int a = std::min(from_->value(), to_->value()) - 1;
+    const int b = std::max(from_->value(), to_->value()) - 1;
+    flipFrame_ = a + int(t * (b - a) + 0.5); // 미리보기 너비 전체가 범위에 대응한다 (빠르게 훑어보기)
+    update();
+}
+
+void FlipPanel::mousePressEvent(QMouseEvent* e) {
+    if (play_->isChecked()) play_->setChecked(false);
+    scrubTo(e->pos());
+}
+void FlipPanel::mouseMoveEvent(QMouseEvent* e) {
+    if (e->buttons() & Qt::LeftButton) scrubTo(e->pos());
 }
 
 // ---------------------------------------------------------------- 리모컨
@@ -242,8 +556,9 @@ BrushPanel::BrushPanel(QWidget* parent) : QWidget(parent) {
         {"연필 · 색연필", {1, 10, 11, 12}},
         {"붓 · 수채", {7, 8, 9, 15}},
         {"에어 · 스프레이", {3, 13, 17}},
-        {"도장", {16, 18, 19}},
+        {"도장 · 점선", {16, 18, 19, 22, 23, 24}},
         {"지우개", {2, 20, 21}},
+        {"컷", {25, 26}},
     };
     buttons_.fill(nullptr, brushPresetCount());
     for (const Group& g : groups) {

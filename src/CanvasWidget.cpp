@@ -131,34 +131,65 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
     p.setRenderHint(QPainter::SmoothPixmapTransform, zoom_ < 1.0);
     p.drawImage(r, cache_);
 
-    // 라이트 테이블: 현재 레이어의 이전 키(빨강)와 다음 키(파랑)를 흐리게 표시
+    // 라이트 테이블: 앞뒤 이미지를 색을 입혀 흐리게 표시 (TVPaint 의 라이트 테이블과 같은 개념)
     if (lightTable_) {
-        const int l = doc_->currentLayer();
-        const int f = doc_->currentFrame();
-        const int k = doc_->keyIndexAt(l, f);
-        auto tinted = [](const QImage& src, const QColor& c) {
+        const auto& P = ltParams_;
+        const int curF = doc_->currentFrame();
+        QVector<int> layers;
+        if (P.allLayers) {
+            for (int l = 0; l < doc_->layerCount(); ++l)
+                if (doc_->layer(l).visible) layers << l;
+        } else {
+            layers << doc_->currentLayer();
+        }
+        auto tinted = [&](const QImage& src, const QColor& c, int dist, int cnt) {
+            if (P.colorMode == 1) return src;
+            QColor col = c;
+            if (P.colorMode == 2) { // 멀어질수록 흰색 쪽으로 옅어진다
+                const double t = cnt > 1 ? double(dist) / (cnt - 1) : 0.0;
+                col = QColor::fromRgbF(c.redF() + (1 - c.redF()) * 0.6 * t, c.greenF() + (1 - c.greenF()) * 0.6 * t,
+                                       c.blueF() + (1 - c.blueF()) * 0.6 * t);
+            }
             QImage t = src;
             QPainter tp(&t);
             tp.setCompositionMode(QPainter::CompositionMode_SourceIn);
-            tp.fillRect(t.rect(), c);
+            tp.fillRect(t.rect(), col);
             return t;
         };
-        const double base = ltParams_.opacity / 100.0;
-        int cur = k;
-        for (int i = 0; i < ltParams_.prev && cur > 0; ++i) {
-            const int pk = doc_->keyIndexAt(l, cur - 1);
-            if (pk < 0) break;
-            p.setOpacity(base * (1.0 - 0.5 * i / std::max(1, ltParams_.prev)));
-            p.drawImage(r, tinted(doc_->keyImage(l, pk), QColor(255, 60, 60)));
-            cur = pk;
-        }
-        int nf = f;
-        for (int i = 0; i < ltParams_.next; ++i) {
-            const int nk = doc_->nextKeyIndex(l, nf);
-            if (nk < 0) break;
-            p.setOpacity(base * 0.85 * (1.0 - 0.5 * i / std::max(1, ltParams_.next)));
-            p.drawImage(r, tinted(doc_->keyImage(l, nk), QColor(60, 120, 255)));
-            nf = nk;
+        for (int l : layers) {
+            // 이전/다음 이미지가 놓인 프레임 번호 목록 (가까운 순서)
+            QVector<int> prevF, nextF;
+            auto matches = [&](int f) {
+                if (f < 0 || f >= doc_->frameCount()) return false;
+                switch (P.mode) {
+                case LightTableParams::Frame: return doc_->resolveKey(l, f) >= 0;
+                case LightTableParams::Bookmark: return doc_->hasBookmark(f) && doc_->resolveKey(l, f) >= 0;
+                case LightTableParams::ImageMark: return doc_->layer(l).imageMarks.contains(f);
+                default: return !doc_->layer(l).frames[f].isNull();
+                }
+            };
+            const int curKey = doc_->keyIndexAt(l, curF);
+            for (int f = (P.mode == LightTableParams::Instance && curKey >= 0 ? curKey : curF) - 1; f >= 0 && prevF.size() < LightTableParams::kSlots; --f)
+                if (matches(f)) prevF << f;
+            for (int f = curF + 1; f < doc_->frameCount() && nextF.size() < LightTableParams::kSlots; ++f)
+                if (matches(f)) nextF << f;
+            auto drawOne = [&](int f, const QColor& col, int op, int dist, int cnt) {
+                if (op <= 0) return;
+                const int k = P.mode == LightTableParams::Frame || P.mode == LightTableParams::Bookmark ? doc_->resolveKey(l, f) : f;
+                if (k < 0) return;
+                p.setOpacity(op / 100.0 * doc_->layer(l).opacity);
+                p.drawImage(r, tinted(doc_->keyImage(l, k), col, dist, cnt));
+            };
+            for (int i = 0; i < prevF.size(); ++i) drawOne(prevF[i], P.prevColor, P.prevOp[i], i, prevF.size());
+            for (int i = 0; i < nextF.size(); ++i) drawOne(nextF[i], P.nextColor, P.nextOp[i], i, nextF.size());
+            // 기본은 현재 그림 뒤에 보이도록, 현재 레이어의 그림을 다시 위에 얹는다
+            if (!P.blendToFront && l == doc_->currentLayer()) {
+                const int ck = doc_->resolveKey(l, curF);
+                if (ck >= 0) {
+                    p.setOpacity(doc_->layer(l).opacity);
+                    p.drawImage(r, doc_->keyImage(l, ck));
+                }
+            }
         }
         p.setOpacity(1.0);
     }
@@ -328,37 +359,59 @@ const QImage& CanvasWidget::dab(int, int, const QColor&, bool) {
     return dabCache_.img; // 구 API (브러시 엔진은 Brush.cpp 로 이동)
 }
 
+void CanvasWidget::markDirty(const QRectF& r) {
+    const double m = brush_.size * 1.2 + 8;
+    dirty_ = dirty_.united(r.adjusted(-m, -m, m, m).toAlignedRect());
+}
+
 void CanvasWidget::stamp(const QPointF& pos, double pr) {
+    markDirty(QRectF(pos, pos));
     brushStampAt(strokeBuf_, brush_, tool_ == Tool::Eraser ? QColor(Qt::black) : colorA_, pos, pr, rng_, dabCache_);
 }
 
 void CanvasWidget::stampAlong(const QPointF& a, const QPointF& b, double pa, double pb) {
+    markDirty(QRectF(a, b).normalized());
     brushStampAlong(strokeBuf_, brush_, tool_ == Tool::Eraser ? QColor(Qt::black) : colorA_, a, b, pa, pb, carry_, rng_, dabCache_);
 }
 
+// 획이 바뀐 영역(dirty_)만 다시 합성한다. 캔버스가 커도 마우스를 움직일 때마다 드는 비용이 획 크기에만 비례한다.
 void CanvasWidget::flushStroke() {
     QImage* img = doc_->editableImage(editLayer_, doc_->currentFrame());
     if (!img) return;
-    *img = strokeBase_;
-    QImage buf = strokeBuf_;
-    if (tool_ == Tool::Pen || tool_ == Tool::Pencil || tool_ == Tool::Eraser) brushApplyGrain(buf, brushPreset(brush_.preset).grain);
+    const QRect full(QPoint(0, 0), strokeBuf_.size());
+    const QRect r = dirty_.isNull() ? QRect() : dirty_.intersected(full);
+    if (r.isEmpty() || strokeBase_.size() != img->size()) {
+        if (strokeBase_.size() == img->size()) return;   // 바뀐 곳이 없다
+        *img = strokeBase_;
+        doc_->notifyChanged();
+        return;
+    }
+    {   // 바뀐 영역만 원본으로 되돌린다
+        QPainter rp(img);
+        rp.setCompositionMode(QPainter::CompositionMode_Source);
+        rp.drawImage(r.topLeft(), strokeBase_, r);
+    }
+    QImage buf = strokeBuf_.copy(r);
+    if (tool_ == Tool::Pen || tool_ == Tool::Pencil || tool_ == Tool::Eraser) brushApplyGrain(buf, brushPreset(brush_.preset).grain, r.topLeft());
     if (paper_) {
         QPainter bp(&buf);
         bp.setCompositionMode(QPainter::CompositionMode_DestinationIn);
-        bp.fillRect(buf.rect(), QBrush(paperTexture()));
+        QBrush pb(paperTexture());
+        pb.setTransform(QTransform::fromTranslate(-r.x(), -r.y()));
+        bp.fillRect(buf.rect(), pb);
     }
     // 스텐실: 다른 레이어의 불투명한 곳에만 그릴 수 있다
     if (!stencilMask_.isNull()) {
         QPainter mp(&buf);
         mp.setCompositionMode(QPainter::CompositionMode_DestinationIn);
-        mp.drawImage(0, 0, stencilMask_);
+        mp.drawImage(-r.x(), -r.y(), stencilMask_);
     }
     QPainter p(img);
     if (stencil_ && selValid_) p.setClipRect(selRect_);
     p.setOpacity(brush_.opacity / 100.0);
     if (tool_ == Tool::Eraser) p.setCompositionMode(QPainter::CompositionMode_DestinationOut);
     else if (doc_->layer(editLayer_).preserveAlpha) p.setCompositionMode(QPainter::CompositionMode_SourceAtop); // 알파 채널 보존
-    p.drawImage(0, 0, buf);
+    p.drawImage(r.topLeft(), buf);
     p.end();
     doc_->notifyChanged();
 }
@@ -369,10 +422,24 @@ void CanvasWidget::beginStroke(const QPointF& ip) {
     stencilMask_ = doc_->stencilMaskFor(editLayer_, doc_->currentFrame());
     strokeBuf_ = QImage(doc_->size(), QImage::Format_ARGB32_Premultiplied);
     strokeBuf_.fill(Qt::transparent);
+    dirty_ = QRect();
     carry_ = 0.0;
     last_ = ip;
     lastPressure_ = pressure_;
     stroking_ = true;
+    if (doc_->recording()) {
+        rec_ = StrokeRec();
+        rec_.layer = editLayer_;
+        rec_.frame = doc_->currentFrame();
+        rec_.brush = brush_;
+        rec_.color = colorA_;
+        rec_.eraser = tool_ == Tool::Eraser;
+        recClock_.start();
+        recActive_ = true;
+        rec_.pts.push_back(ip);
+        rec_.pressure.push_back(float(pressure_));
+        rec_.ms.push_back(0);
+    }
     stamp(ip, pressure_);
     flushStroke();
 }
@@ -388,6 +455,7 @@ void CanvasWidget::drawViaBuffer(const std::function<void(QPainter&)>& fn, const
         p.setRenderHint(QPainter::Antialiasing, true);
         fn(p);
     }
+    dirty_ = QRect(QPoint(0, 0), strokeBuf_.size());
     flushStroke();
     commitEdit(text);
 }
@@ -532,6 +600,11 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent* e) {
         if (smoothing_) target = last_ + (ip - last_) * 0.4;
         stampAlong(last_, target, lastPressure_, pressure_);
         flushStroke();
+        if (recActive_) {
+            rec_.pts.push_back(target);
+            rec_.pressure.push_back(float(pressure_));
+            rec_.ms.push_back(int(recClock_.elapsed()));
+        }
         last_ = target;
         lastPressure_ = pressure_;
     } else if (shaping_) {
@@ -569,6 +642,20 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent* e) {
         if (smoothing_ && last_ != ip) {
             stampAlong(last_, ip, lastPressure_, pressure_);
             flushStroke();
+            if (recActive_) {
+                rec_.pts.push_back(ip);
+                rec_.pressure.push_back(float(pressure_));
+                rec_.ms.push_back(int(recClock_.elapsed()));
+            }
+        }
+        if (recActive_) {
+            recActive_ = false;
+            if (rec_.pts.size() == 1) { // 점 하나: 아주 짧은 선으로 만들어 재생 때 보이게 한다
+                rec_.pts.push_back(rec_.pts[0] + QPointF(0.01, 0));
+                rec_.pressure.push_back(rec_.pressure[0]);
+                rec_.ms.push_back(rec_.ms[0] + 30);
+            }
+            doc_->addStroke(rec_);
         }
         commitEdit(QStringLiteral("획 그리기"));
         pressure_ = 1.0;

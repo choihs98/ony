@@ -32,6 +32,12 @@ const BrushPreset kPresets[] = {
     {"별 도장",       BrushShape::Star,   26, 100, 100, 160,  0,   0, false, false, false, 100,   0},
     {"부드러운 지우개", BrushShape::Round, 30, 100,  0,  10,   0,   0, true,  false, false, 100,   0},
     {"질감 지우개",   BrushShape::Round,  22, 100, 80,   8,   6,  70, true,  false, false, 100,   0},
+    // 데모3: 점선 계열 · 컷 브러시 (follow = 획 방향으로 회전)
+    {"파선",          BrushShape::Square, 16, 100, 100, 190,  0,   0, false, false, false,  30,   0, true},
+    {"점선 (촘촘)",   BrushShape::Round,   5, 100, 100, 150,  0,   0, false, false, false, 100,   0},
+    {"점선 (사각)",   BrushShape::Square,  8, 100, 100, 200,  0,   0, false, false, false, 100,   0},
+    {"컷 브러시",     BrushShape::Round,   3, 100, 100,   6,  0,   0, true,  false, true,  100,   0},
+    {"컷 (사각)",     BrushShape::Square, 14, 100, 100,   8,  0,   0, true,  false, true,  100,   0},
 };
 constexpr int kCount = sizeof(kPresets) / sizeof(kPresets[0]);
 
@@ -129,7 +135,13 @@ void brushStampAt(QImage& buf, const BrushParams& params, const QColor& color, c
     }
     const QImage& img = dabFor(cache, pi, int(std::ceil(r * 2.0)), pr.aliased ? 100 : params.hardness, pr.eraser ? QColor(Qt::black) : color);
     p.setOpacity(sc);
-    p.drawImage(at - QPointF(img.width() / 2.0, img.height() / 2.0), img);
+    if (pr.follow) {
+        p.translate(at);
+        p.rotate(cache.dir);
+        p.drawImage(QPointF(-img.width() / 2.0, -img.height() / 2.0), img);
+    } else {
+        p.drawImage(at - QPointF(img.width() / 2.0, img.height() / 2.0), img);
+    }
 }
 
 void brushStampAlong(QImage& buf, const BrushParams& params, const QColor& color, const QPointF& a, const QPointF& b,
@@ -139,6 +151,7 @@ void brushStampAlong(QImage& buf, const BrushParams& params, const QColor& color
     const double dist = std::hypot(dx, dy);
     if (dist < 1e-6) return;
     const double step = std::max(1.0, params.size * pr.spacing / 100.0);
+    cache.dir = std::atan2(dy, dx) * 180.0 / M_PI;
     double t = carry;
     while (t <= dist) {
         const double u = t / dist;
@@ -148,7 +161,7 @@ void brushStampAlong(QImage& buf, const BrushParams& params, const QColor& color
     carry = t - dist;
 }
 
-void brushApplyGrain(QImage& buf, int grain) {
+void brushApplyGrain(QImage& buf, int grain, QPoint origin) {
     if (grain <= 0) return;
     static QImage tile[101];
     const int g = std::clamp(grain, 1, 100);
@@ -168,7 +181,9 @@ void brushApplyGrain(QImage& buf, int grain) {
     }
     QPainter p(&buf);
     p.setCompositionMode(QPainter::CompositionMode_DestinationIn);
-    p.fillRect(buf.rect(), QBrush(tile[g]));
+    QBrush gb(tile[g]);
+    gb.setTransform(QTransform::fromTranslate(-origin.x(), -origin.y()));
+    p.fillRect(buf.rect(), gb);
 }
 
 QImage brushPreview(const BrushParams& params, const QColor& color, QSize size) {

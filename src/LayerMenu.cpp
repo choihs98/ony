@@ -5,6 +5,11 @@
 
 #include <QAction>
 #include <QActionGroup>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
+#include <QComboBox>
+#include <QFormLayout>
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMenu>
@@ -125,6 +130,85 @@ void populate(QMenu* m, Document* doc, const std::function<int()>& layerFn, cons
         else doc->layer(l).instanceNames[k] = n;
         doc->notifyChanged();
     });
+    // ---- 퍼펫 레이어 ----
+    m->addSeparator();
+    QMenu* pm = m->addMenu("퍼펫 레이어");
+    QAction* pOn = pm->addAction("퍼펫 레이어로 사용");
+    pOn->setCheckable(true);
+    QAction* pKey = pm->addAction("현재 프레임에 퍼펫 키 설정...");
+    QAction* pDel = pm->addAction("현재 프레임의 퍼펫 키 삭제");
+    QAction* pPiv = pm->addAction("피벗(회전 중심) 설정...");
+    QMenu* pPar = pm->addMenu("부모 레이어 연결");
+    QObject::connect(pm, &QMenu::aboutToShow, pm, [=] {
+        const int l = std::clamp(layerFn(), 0, doc->layerCount() - 1);
+        const bool on = doc->layer(l).puppet;
+        pOn->setChecked(on);
+        pKey->setEnabled(on);
+        pDel->setEnabled(on && doc->layer(l).pkeys.contains(frameFn()));
+        pPiv->setEnabled(on);
+        pPar->setEnabled(on);
+        pPar->clear();
+        QAction* none = pPar->addAction("연결 안 함");
+        QObject::connect(none, &QAction::triggered, pPar, [=] { doc->setPuppetParent(l, -1); });
+        for (int i = 0; i < doc->layerCount(); ++i) {
+            if (i == l || !doc->layer(i).puppet) continue;
+            QAction* a = pPar->addAction(doc->layer(i).name);
+            a->setCheckable(true);
+            a->setChecked(doc->puppetParentLayer(l) == i);
+            QObject::connect(a, &QAction::triggered, pPar, [=] { doc->setPuppetParent(l, i); });
+        }
+    });
+    QObject::connect(pOn, &QAction::triggered, pm, [=](bool on) { doc->setPuppet(std::clamp(layerFn(), 0, doc->layerCount() - 1), on); });
+    QObject::connect(pDel, &QAction::triggered, pm, [=] { doc->removePuppetKey(layerFn(), frameFn()); });
+    QObject::connect(pPiv, &QAction::triggered, pm, [=] {
+        const int l = std::clamp(layerFn(), 0, doc->layerCount() - 1);
+        QDialog dlg;
+        dlg.setWindowTitle("피벗 설정");
+        auto* f = new QFormLayout(&dlg);
+        auto* x = new QDoubleSpinBox; x->setRange(0, 16384); x->setDecimals(1);
+        auto* y = new QDoubleSpinBox; y->setRange(0, 16384); y->setDecimals(1);
+        const Layer& Ly = doc->layer(l);
+        x->setValue(Ly.pivotX < 0 ? doc->size().width() / 2.0 : Ly.pivotX);
+        y->setValue(Ly.pivotY < 0 ? doc->size().height() / 2.0 : Ly.pivotY);
+        f->addRow("X (그림 좌표)", x);
+        f->addRow("Y (그림 좌표)", y);
+        auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        f->addRow(bb);
+        QObject::connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+        QObject::connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+        if (dlg.exec() == QDialog::Accepted) doc->setPuppetPivot(l, x->value(), y->value());
+    });
+    QObject::connect(pKey, &QAction::triggered, pm, [=] {
+        const int l = std::clamp(layerFn(), 0, doc->layerCount() - 1), fr = frameFn();
+        const CameraKey cur = doc->puppetAt(l, fr);
+        QDialog dlg;
+        dlg.setWindowTitle(QString("퍼펫 키 - 프레임 %1").arg(fr + 1));
+        auto* f = new QFormLayout(&dlg);
+        auto mk = [&](double lo, double hi, double v, int dec) {
+            auto* s = new QDoubleSpinBox; s->setRange(lo, hi); s->setDecimals(dec); s->setValue(v); return s;
+        };
+        auto* x = mk(-16384, 16384, cur.x, 1);
+        auto* y = mk(-16384, 16384, cur.y, 1);
+        auto* sc = mk(1, 2000, cur.scale * 100, 1);
+        auto* rot = mk(-3600, 3600, cur.rotation, 1);
+        auto* ease = new QComboBox;
+        ease->addItems({"직선", "느리게 시작", "느리게 끝", "느리게 시작·끝", "계단"});
+        ease->setCurrentIndex(std::clamp(cur.ease, 0, 4));
+        f->addRow("X 이동", x);
+        f->addRow("Y 이동", y);
+        f->addRow("크기 (%)", sc);
+        f->addRow("회전 (°)", rot);
+        f->addRow("다음 키까지 속도", ease);
+        auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        f->addRow(bb);
+        QObject::connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+        QObject::connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+        if (dlg.exec() != QDialog::Accepted) return;
+        CameraKey k;
+        k.x = x->value(); k.y = y->value(); k.scale = sc->value() / 100.0; k.rotation = rot->value(); k.ease = ease->currentIndex();
+        doc->setPuppetKey(l, fr, k);
+    });
+    m->addSeparator();
     QMenu* mk = m->addMenu("이미지 마크");
     QObject::connect(mk, &QMenu::aboutToShow, mk, [=] {
         mk->clear();

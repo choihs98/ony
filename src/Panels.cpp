@@ -1,4 +1,5 @@
 #include "Panels.h"
+#include <QFormLayout>
 #include "Document.h"
 
 #include <QButtonGroup>
@@ -621,13 +622,31 @@ FxPanel::FxPanel(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) {
     list_ = new QListWidget;
     lay->addWidget(list_, 1);
     auto* row = new QHBoxLayout;
+    auto* cat = new QComboBox;
+    cat->addItems(Effects::categories());
     type_ = new QComboBox;
-    for (auto t : {Effects::Type::Invert, Effects::Type::Grayscale, Effects::Type::Brightness, Effects::Type::Blur})
-        type_->addItem(Effects::typeName(t), int(t));
     param_ = new QSpinBox;
-    param_->setRange(-100, 100);
-    param_->setValue(4);
-    param_->setToolTip(QStringLiteral("밝기: -100~100 / 블러: 반경 1~16"));
+    auto syncType = [this] {
+        const auto pi = Effects::paramInfo(Effects::Type(type_->currentData().toInt()));
+        param_->setEnabled(pi.has);
+        if (pi.has) {
+            param_->setRange(pi.lo, pi.hi);
+            param_->setValue(pi.def);
+            param_->setToolTip(pi.label);
+            param_->setPrefix(pi.label + QStringLiteral(" "));
+        } else {
+            param_->setPrefix(QString());
+        }
+    };
+    auto fillTypes = [this, cat, syncType] {
+        type_->clear();
+        for (auto t : Effects::typesIn(cat->currentText())) type_->addItem(Effects::typeName(t), int(t));
+        syncType();
+    };
+    connect(cat, &QComboBox::currentIndexChanged, this, fillTypes);
+    connect(type_, &QComboBox::currentIndexChanged, this, syncType);
+    fillTypes();
+    row->addWidget(cat);
     row->addWidget(type_);
     row->addWidget(param_);
     lay->addLayout(row);
@@ -645,7 +664,6 @@ FxPanel::FxPanel(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) {
         Effects::Item item;
         item.type = Effects::Type(type_->currentData().toInt());
         item.param = param_->value();
-        if (item.type == Effects::Type::Blur) item.param = std::clamp(item.param, 1, 16);
         doc_->addFx(doc_->currentLayer(), item);
     });
     connect(del, &QToolButton::clicked, this, [this] {
@@ -662,7 +680,7 @@ void FxPanel::rebuild() {
     list_->clear();
     for (const auto& fx : L.fx) {
         QString s = Effects::typeName(fx.type);
-        if (fx.type == Effects::Type::Brightness || fx.type == Effects::Type::Blur) s += QString(" (%1)").arg(fx.param);
+        if (Effects::paramInfo(fx.type).has) s += QString(" (%1)").arg(fx.param);
         list_->addItem(s);
     }
 }
@@ -694,7 +712,24 @@ CameraPanel::CameraPanel(Document* doc, QWidget* parent) : QWidget(parent), doc_
     auto* del = new QToolButton;
     del->setText(QStringLiteral("현재 프레임 키 삭제"));
     lay->addWidget(del);
+    ease_ = new QComboBox;
+    ease_->addItems({"직선 (일정한 속도)", "느리게 시작", "느리게 끝", "느리게 시작 · 느리게 끝", "계단 (다음 키에서 한 번에 이동)"});
+    ease_->setToolTip("현재 프레임의 키에서 다음 키까지 카메라가 움직이는 속도 곡선");
+    auto* easeRow = new QFormLayout;
+    easeRow->addRow(QStringLiteral("속도 곡선"), ease_);
+    lay->addLayout(easeRow);
+    keys_ = new QListWidget;
+    keys_->setToolTip(QStringLiteral("카메라 키프레임 목록 (더블클릭: 그 프레임으로 이동)"));
+    keys_->setMaximumHeight(110);
+    lay->addWidget(keys_);
     lay->addStretch();
+    connect(ease_, &QComboBox::currentIndexChanged, this, [this](int i) {
+        if (syncing_ || !doc_->hasCameraKey(doc_->currentFrame())) return;
+        CameraKey k = doc_->cameraAt(doc_->currentFrame());
+        k.ease = i;
+        doc_->setCameraKey(doc_->currentFrame(), k);
+    });
+    connect(keys_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* it) { doc_->setCurrentFrame(it->data(Qt::UserRole).toInt()); });
 
     connect(enable_, &QCheckBox::toggled, this, [this](bool on) {
         if (!syncing_) doc_->setCameraEnabled(on);
@@ -720,6 +755,7 @@ void CameraPanel::apply() {
     k.y = y_->value();
     k.scale = scale_->value() / 100.0;
     k.rotation = rot_->value();
+    if (doc_->hasCameraKey(doc_->currentFrame())) k.ease = doc_->cameraAt(doc_->currentFrame()).ease; // 속도 곡선은 유지
     doc_->setCameraKey(doc_->currentFrame(), k);
 }
 
@@ -734,6 +770,16 @@ void CameraPanel::sync() {
     info_->setText(QString("키 %1개 · 현재 프레임: %2")
                        .arg(doc_->cameraKeys().size())
                        .arg(doc_->hasCameraKey(doc_->currentFrame()) ? "키" : "보간"));
+    ease_->setEnabled(doc_->hasCameraKey(doc_->currentFrame()));
+    ease_->setCurrentIndex(doc_->hasCameraKey(doc_->currentFrame()) ? k.ease : 0);
+    keys_->clear();
+    static const char* easeName[] = {"직선", "느리게 시작", "느리게 끝", "느리게 시작·끝", "계단"};
+    for (auto it = doc_->cameraKeys().cbegin(); it != doc_->cameraKeys().cend(); ++it) {
+        auto* item = new QListWidgetItem(QString("프레임 %1   %2").arg(it.key() + 1).arg(QString::fromUtf8(easeName[std::clamp(it.value().ease, 0, 4)])));
+        item->setData(Qt::UserRole, it.key());
+        keys_->addItem(item);
+        if (it.key() == doc_->currentFrame()) keys_->setCurrentItem(item);
+    }
     syncing_ = false;
 }
 

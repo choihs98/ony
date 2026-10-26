@@ -10,6 +10,8 @@
 #include "CanvasWidget.h"
 #include "Document.h"
 #include "Effects.h"
+#include "Print.h"
+#include "TimelineWidget.h"
 #include "MainWindow.h"
 #include <QLineEdit>
 #include <QDockWidget>
@@ -357,6 +359,207 @@ static void testResizeAndNext(MainWindow& w) {
     CHECK(d->currentFrame() == 3);
 }
 
+static int greenPixels(const QImage& im) {
+    int n = 0;
+    for (int y = 0; y < im.height(); ++y)
+        for (int x = 0; x < im.width(); ++x) {
+            const QColor c = im.pixelColor(x, y);
+            if (c.green() > c.red() + 40 && c.green() > c.blue() + 40) ++n;
+        }
+    return n;
+}
+
+static void testPuppet() {
+    Document d;
+    d.newProject(QSize(100, 60), 6, 12);
+    QImage sq(100, 60, QImage::Format_ARGB32_Premultiplied);
+    sq.fill(Qt::transparent);
+    { QPainter p(&sq); p.fillRect(10, 20, 10, 10, Qt::black); }
+    d.pushKeyEdit(0, 0, QImage(), sq, "sq");
+    auto blackAt = [&](int f, int x, int y) { return qAlpha(d.composite(f, false, false).pixel(x, y)) > 128; };
+    CHECK(blackAt(2, 15, 25));
+    d.setPuppet(0, true);
+    CameraKey a, b; b.x = 40;
+    d.setPuppetKey(0, 0, a);
+    d.setPuppetKey(0, 4, b);
+    CHECK(blackAt(0, 15, 25) && !blackAt(0, 35, 25));
+    CHECK(blackAt(2, 35, 25) && !blackAt(2, 15, 25));   // 중간 프레임: 20px 이동
+    CHECK(blackAt(4, 55, 25));
+    // 부모 연결: 부모가 40px 이동하면 자식도 같이 움직인다
+    const int c = d.addLayer("자식");
+    QImage dot(100, 60, QImage::Format_ARGB32_Premultiplied);
+    dot.fill(Qt::transparent);
+    { QPainter p(&dot); p.fillRect(70, 40, 6, 6, Qt::red); }
+    d.pushKeyEdit(c, 0, QImage(), dot, "dot");
+    d.setPuppet(c, true);
+    d.setPuppetParent(c, 0);
+    CHECK(d.puppetParentLayer(c) == 0);
+    CHECK(qAlpha(d.composite(4, false, false).pixel(113 - 100 + 70 - 70 + 40, 43)) >= 0);
+    const QImage f4 = d.composite(4, false, false);
+    CHECK(qAlpha(f4.pixel(72, 43)) < 128);               // 원래 자리는 비고
+    // 순환 연결은 거절된다
+    d.setPuppetParent(0, c);
+    CHECK(d.puppetParentLayer(0) == -1);
+    // 저장/불러오기
+    CHECK(d.saveCopy("/tmp/demo/puppet.ony"));
+    Document e;
+    CHECK(e.load("/tmp/demo/puppet.ony"));
+    CHECK(e.layer(0).puppet && e.layer(0).pkeys.size() == 2 && e.puppetParentLayer(1) == 0);
+    CHECK(qAlpha(e.composite(2, false, false).pixel(35, 25)) > 128);
+}
+
+static void testTimelineZoom() {
+    Document d;
+    d.newProject(QSize(64, 64), 6, 24);
+    d.addLayer(QStringLiteral("두번째"));
+    TimelineWidget t(&d);
+    const QSize s0 = t.sizeHint();
+    t.setCellWidth(20);
+    CHECK(t.sizeHint().width() < s0.width());
+    t.setCellWidth(1000);
+    CHECK(t.cell() == 96);
+    t.setCellWidth(TimelineWidget::kCell);
+    CHECK(t.sizeHint() == s0);
+    t.setCompact(true);
+    CHECK(t.sizeHint().height() < s0.height());
+    t.resize(t.sizeHint());
+    CHECK(!t.grab().isNull());
+    t.grab().save("/tmp/demo/11_compact.png");
+    t.setCompact(false);
+    CHECK(t.sizeHint() == s0);
+}
+
+static void testCutDashBrush() {
+    CHECK(brushPresetCount() >= 27);
+    int dash = -1, cut = -1, dot = -1;
+    for (int i = 0; i < brushPresetCount(); ++i) {
+        const QString n = QString::fromUtf8(brushPreset(i).name);
+        if (n == "파선") dash = i;
+        if (n == "컷 브러시") cut = i;
+        if (n == "점선") dot = i;
+    }
+    CHECK(dash >= 0 && cut >= 0 && dot >= 0);
+    CHECK(brushPreset(cut).eraser);
+    QImage buf(200, 40, QImage::Format_ARGB32_Premultiplied);
+    buf.fill(Qt::transparent);
+    BrushParams p; p.preset = dash; p.size = 12;
+    QRandomGenerator rng(1);
+    BrushDabCache cache;
+    double carry = 0;
+    brushStampAlong(buf, p, Qt::black, QPointF(10, 20), QPointF(190, 20), 1, 1, carry, rng, cache);
+    int runs = 0; bool in = false;
+    for (int x = 0; x < 200; ++x) {
+        const bool op = qAlpha(buf.pixel(x, 20)) > 128;
+        if (op && !in) ++runs;
+        in = op;
+    }
+    CHECK(runs >= 4);          // 선이 끊어진 대시들로 나온다
+    // 대시는 획 방향(가로)으로 길쭉하다: 같은 대시 안에서 가로 폭 > 세로 폭
+    int w0 = 0, h0 = 0;
+    for (int x = 0; x < 30; ++x) if (qAlpha(buf.pixel(x, 20)) > 128) ++w0;
+    for (int y = 0; y < 40; ++y) if (qAlpha(buf.pixel(12, y)) > 128) ++h0;
+    CHECK(w0 > h0);
+}
+
+static void testFxCategories(MainWindow& w) {
+    QImage im(64, 48, QImage::Format_ARGB32_Premultiplied);
+    im.fill(Qt::white);
+    { QPainter p(&im); p.fillRect(10, 10, 20, 20, QColor(200, 30, 30)); }
+    int n = 0;
+    for (int i = 0; i <= int(Effects::Type::Last); ++i) {
+        Effects::Item it{Effects::Type(i), Effects::paramInfo(Effects::Type(i)).def};
+        const QImage o = Effects::apply(im, it);
+        CHECK(o.size() == im.size());
+        CHECK(!Effects::typeName(it.type).isEmpty());
+        ++n;
+    }
+    CHECK(n >= 28);
+    CHECK(Effects::categories().size() == 7);
+    // 흰색 제거: 배경 알파 0, 빨간 사각형은 유지
+    const QImage k = Effects::apply(im, {Effects::Type::KeyWhite, 20});
+    CHECK(qAlpha(k.pixel(2, 2)) == 0);
+    CHECK(qAlpha(k.pixel(20, 20)) == 255);
+    // 모자이크는 크기를 유지하고, 세피아는 회색이 아닌 색
+    CHECK(Effects::apply(im, {Effects::Type::Pixelate, 8}).size() == im.size());
+    // 전환: 3프레임 사이를 디졸브로 채운다
+    Document* d = w.document();
+    d->newProject(QSize(32, 32), 6, 12);
+    QImage a(32, 32, QImage::Format_ARGB32_Premultiplied), b = a;
+    a.fill(Qt::black); b.fill(Qt::white);
+    d->pushKeyEdit(0, 0, QImage(), a, "a");
+    d->pushKeyEdit(0, 4, QImage(), b, "b");
+    d->setCurrentFrame(0);
+    CHECK(w.runTransition(0, 0, 4, 0));
+    const int gv = qRed(d->keyImage(0, d->resolveKey(0, 2)).pixel(5, 5));
+    CHECK(gv > 90 && gv < 170);
+    CHECK(d->layer(0).frames[1].isNull() == false);
+    d->undoStack()->undo();
+    CHECK(d->layer(0).frames[1].isNull());
+    // FX 저장/불러오기 왕복
+    d->addFx(0, {Effects::Type::Sharpen, 120});
+    d->addFx(0, {Effects::Type::Swirl, 40});
+    CHECK(d->saveCopy("/tmp/demo/fx.ony"));
+    Document e;
+    CHECK(e.load("/tmp/demo/fx.ony"));
+    CHECK(e.layer(0).fx.size() == 2 && e.layer(0).fx[1].type == Effects::Type::Swirl);
+}
+
+static void testLightTable() {
+    Document d;
+    d.newProject(QSize(100, 60), 6, 12);
+    auto rectImg = [](int x) {
+        QImage im(100, 60, QImage::Format_ARGB32_Premultiplied);
+        im.fill(Qt::transparent);
+        QPainter p(&im);
+        p.fillRect(x, 10, 20, 20, Qt::black);
+        return im;
+    };
+    d.pushKeyEdit(0, 0, QImage(), rectImg(5), "a");
+    d.pushKeyEdit(0, 2, QImage(), rectImg(40), "b");
+    d.pushKeyEdit(0, 4, QImage(), rectImg(70), "c");
+    d.setCurrentFrame(2);
+    CanvasWidget c(&d);
+    c.resize(400, 300);
+    CHECK(greenPixels(c.grab().toImage()) == 0);
+    c.setLightTable(true);
+    CHECK(greenPixels(c.grab().toImage()) > 50);   // 이전 이미지(초록)
+    CanvasWidget::LightTableParams p;
+    for (int i = 0; i < CanvasWidget::LightTableParams::kSlots; ++i) p.prevOp[i] = 0;
+    c.setLightTableParams(p);
+    CHECK(greenPixels(c.grab().toImage()) == 0);   // 이전 이미지 슬라이더를 모두 0 으로
+    // 북마크 모드: 북마크가 없으면 아무것도 안 보인다
+    p.prevOp[0] = 60;
+    p.mode = CanvasWidget::LightTableParams::Bookmark;
+    c.setLightTableParams(p);
+    CHECK(greenPixels(c.grab().toImage()) == 0);
+    d.toggleBookmark(0);
+    CHECK(greenPixels(c.grab().toImage()) > 50);
+}
+
+static void testSequenceExport() {
+    Document d;
+    d.newProject(QSize(40, 30), 5, 12);
+    for (int f = 0; f < 5; ++f) d.pushKeyEdit(0, f, QImage(), solid(d.size(), QColor(40 * f, 100, 200)), "k");
+    QTemporaryDir tmp;
+    VideoOptions o;
+    o.format = "png";
+    o.from = 1;
+    o.to = 3;
+    o.background = QColor(0, 0, 0, 0);
+    o.baseName = "x";
+    CHECK(VideoExport::run(&d, tmp.path(), o).isEmpty());
+    CHECK(QFileInfo::exists(tmp.filePath("x_0001.png")) && QFileInfo::exists(tmp.filePath("x_0003.png")) && !QFileInfo::exists(tmp.filePath("x_0004.png")));
+    // 빈 레이어 위에서 배경이 투명인지 / 색이 지정되는지
+    Document e;
+    e.newProject(QSize(10, 10), 2, 12);
+    CHECK(qAlpha(e.renderFrame(0, QColor(0, 0, 0, 0), false).pixel(1, 1)) == 0);
+    CHECK(e.renderFrame(0, QColor(10, 20, 30), false).pixelColor(1, 1) == QColor(10, 20, 30));
+    o.format = "jpg";
+    o.scalePercent = 200;
+    CHECK(VideoExport::run(&d, tmp.path(), o).isEmpty());
+    CHECK(QImage(tmp.filePath("x_0001.jpg")).width() == 80);
+}
+
 static void testVideo() {
     const QString ff = VideoExport::findFfmpeg();
     if (ff.isEmpty()) { qInfo("ffmpeg 없음: 동영상 테스트 건너뜀"); return; }
@@ -468,9 +671,131 @@ static void testLayerFeatures() {
     CHECK(r.nearestBookmark(0, 1) == 6 && r.nearestBookmark(9, -1) == 6);
 }
 
+static void testImageMenu() {
+    Document d;
+    d.newProject(QSize(32, 32), 10, 12);
+    auto mk = [](int v) { QImage im(32, 32, QImage::Format_ARGB32_Premultiplied); im.fill(QColor(v, v, v)); return im; };
+    d.layer(0).frames[0] = mk(10);
+    d.layer(0).frames[2] = mk(20);  // 10 은 2프레임 노출
+    d.layer(0).frames[3] = mk(30);
+    d.reverseKeys(0, 0, 3);
+    // 뒤집으면 30(1프레임) → 20(1프레임) → 10(2프레임) 순서
+    CHECK(qRed(d.layer(0).frames[0].pixel(0, 0)) == 30);
+    CHECK(qRed(d.layer(0).frames[1].pixel(0, 0)) == 20);
+    CHECK(qRed(d.layer(0).frames[2].pixel(0, 0)) == 10);
+    CHECK(d.layer(0).frames[3].isNull());
+    d.setUniformExposure(0, 3);
+    CHECK(!d.layer(0).frames[0].isNull() && !d.layer(0).frames[3].isNull() && !d.layer(0).frames[6].isNull());
+    CHECK(d.layer(0).frames[1].isNull() && d.layer(0).frames[2].isNull());
+    QTemporaryDir tmp;
+    CHECK(d.save(tmp.filePath("a.ony")));
+    d.setModified(true);
+    CHECK(d.saveCopy(tmp.filePath("b.ony")));
+    CHECK(d.path() == tmp.filePath("a.ony") && d.modified());
+}
+
+static void testRepeat() {
+    auto mk = [](int v) { QImage im(8, 8, QImage::Format_ARGB32_Premultiplied); im.fill(QColor(v, v, v)); return im; };
+    Document d;
+    d.newProject(QSize(8, 8), 6, 12);
+    d.layer(0).frames[0] = mk(10);
+    d.layer(0).frames[2] = mk(20);
+    CHECK(d.repeatKeys(0, 0, 2, 2, false) == 6);
+    CHECK(d.frameCount() >= 9);
+    auto v = [&](int f) { return d.layer(0).frames[f].isNull() ? -1 : qRed(d.layer(0).frames[f].pixel(0, 0)); };
+    CHECK(v(3) == 10 && v(4) == -1 && v(5) == 20 && v(6) == 10 && v(8) == 20);
+    Document e;
+    e.newProject(QSize(8, 8), 6, 12);
+    e.layer(0).frames[0] = mk(10);
+    e.layer(0).frames[2] = mk(20);
+    e.repeatKeys(0, 0, 2, 2, true);
+    auto u = [&](int f) { return e.layer(0).frames[f].isNull() ? -1 : qRed(e.layer(0).frames[f].pixel(0, 0)); };
+    CHECK(u(3) == 20 && u(4) == 10 && u(6) == 10 && u(8) == 20); // 첫 반복은 거꾸로, 둘째는 원래 순서
+}
+
+static void testCameraEase() {
+    Document d;
+    d.newProject(QSize(100, 60), 11, 12);
+    CameraKey a, b;
+    b.x = 100;
+    a.ease = 1;                       // 느리게 시작
+    d.setCameraKey(0, a);
+    d.setCameraKey(10, b);
+    const double mid = d.cameraAt(5).x;
+    CHECK(mid < 20);                  // 느리게 시작이면 중간 지점에서 아직 멀리 못 갔다
+    a.ease = 0;
+    d.setCameraKey(0, a);
+    CHECK(std::abs(d.cameraAt(5).x - 50) < 0.01);
+    a.ease = 4;
+    d.setCameraKey(0, a);
+    CHECK(d.cameraAt(9).x == 0 && d.cameraAt(10).x == 100);
+    a.ease = 3;
+    d.setCameraKey(0, a);
+    QTemporaryDir tmp;
+    CHECK(d.save(tmp.filePath("c.ony")));
+    Document e;
+    CHECK(e.load(tmp.filePath("c.ony")));
+    CHECK(e.cameraKeys().value(0).ease == 3);   // 저장/불러오기 후에도 속도 곡선 유지
+}
+
+static void testPingPong(MainWindow& w) {
+    QToolButton *ping = nullptr, *play = nullptr, *stop = nullptr;
+    for (auto* b : w.findChildren<QToolButton*>()) {
+        if (b->toolTip().startsWith("왕복 재생")) ping = b;
+        if (b->toolTip().startsWith("재생 (Enter)")) play = b;
+        if (b->toolTip() == "정지") stop = b;
+    }
+    CHECK(ping && play);
+    if (!ping || !play) return;
+    Document* d = w.document();
+    ping->setChecked(true);
+    const int last = d->frameCount() - 1;
+    d->setCurrentFrame(last - 2);
+    QVector<int> seq;
+    const auto conn = QObject::connect(d, &Document::currentChanged, &w, [&] { seq << d->currentFrame(); });
+    play->click();
+    QTest::qWait(700);
+    if (stop) stop->click();
+    QObject::disconnect(conn);
+    int mx = 0, afterMaxMin = last;
+    for (int v : seq) mx = std::max(mx, v);
+    CHECK(mx == last);                  // 끝까지 갔다가
+    bool seenMax = false;
+    for (int v : seq) { if (v == mx) seenMax = true; else if (seenMax) afterMaxMin = std::min(afterMaxMin, v); }
+    CHECK(afterMaxMin < last);          // 되돌아온다 (왕복)
+    ping->setChecked(false);
+}
+
+static void testStretch() {
+    auto mk = [](int v) { QImage im(8, 8, QImage::Format_ARGB32_Premultiplied); im.fill(QColor(v, v, v)); return im; };
+    Document d;
+    d.newProject(QSize(8, 8), 12, 12);
+    d.layer(0).frames[0] = mk(10);
+    d.layer(0).frames[6] = mk(20);
+    d.toggleBookmark(6);
+    d.stretchToFps(24);                     // 12fps → 24fps: 길이(초)는 같고 프레임 수는 2배
+    CHECK(d.fps() == 24 && d.frameCount() == 24);
+    CHECK(!d.layer(0).frames[0].isNull() && !d.layer(0).frames[12].isNull() && d.layer(0).frames[6].isNull());
+    CHECK(d.hasBookmark(12));
+    d.stretchToFps(12);                     // 다시 돌리면 원래 위치
+    CHECK(d.frameCount() == 12 && !d.layer(0).frames[6].isNull());
+}
+
 static void testShortcuts(MainWindow& w) {
+    w.activateWindow();
+    QTest::qWait(30);
     using T = CanvasWidget::Tool;
     auto press = [&](Qt::Key k) { QTest::keyClick(&w, k); QTest::qWait(20); };
+    {   // Ctrl+L 라이트 테이블, Ins 프레임 추가
+        const int n0 = w.document()->frameCount();
+        QTest::keyClick(&w, Qt::Key_Insert, Qt::ControlModifier); QTest::qWait(20);
+        CHECK(w.document()->frameCount() == n0 + 1);
+        QTest::keyClick(&w, Qt::Key_L, Qt::ControlModifier); QTest::qWait(20);
+        CHECK(w.lightTableOn());
+        QTest::keyClick(&w, Qt::Key_L, Qt::ControlModifier); QTest::qWait(20);
+        CHECK(!w.lightTableOn());
+        w.document()->deleteFrame(w.document()->currentFrame());
+    }
     press(Qt::Key_E);
     CHECK(w.canvas()->tool() == T::Eraser);
     press(Qt::Key_B);
@@ -499,6 +824,97 @@ static void testShortcuts(MainWindow& w) {
     press(Qt::Key_E);
     CHECK(w.canvas()->tool() == T::Eraser);
     press(Qt::Key_B);
+}
+
+static void testRenderPrintPublish(MainWindow& w) {
+    Document* d = w.document();
+    d->newProject(QSize(160, 100), 6, 12);
+    QImage im(160, 100, QImage::Format_ARGB32_Premultiplied);
+    im.fill(Qt::transparent);
+    { QPainter p(&im); p.fillRect(0, 0, 160, 100, Qt::red); }
+    d->pushKeyEdit(0, 0, QImage(), im, "r");
+    // 렌더 카메라: 크기·맞춤 방식
+    CHECK(d->renderSize() == QSize(160, 100));
+    RenderCamera rc; rc.on = true; rc.size = QSize(320, 320); rc.fit = 0;
+    d->setRenderCamera(rc);
+    CHECK(d->renderSize() == QSize(320, 320));
+    QImage r0 = d->renderFrame(0, Qt::white, false);
+    CHECK(r0.size() == QSize(320, 320));
+    CHECK(qRed(r0.pixel(160, 5)) == 255 && qGreen(r0.pixel(160, 5)) == 255);      // 위쪽 여백은 배경(흰색)
+    CHECK(qGreen(r0.pixel(160, 160)) < 40);                                          // 가운데는 빨강
+    rc.fit = 1; d->setRenderCamera(rc);
+    r0 = d->renderFrame(0, Qt::white, false);
+    CHECK(qGreen(r0.pixel(160, 5)) < 40);                                            // 채우기: 여백 없음
+    // 저장/불러오기
+    CHECK(d->saveCopy("/tmp/demo/rc.ony"));
+    Document e;
+    CHECK(e.load("/tmp/demo/rc.ony"));
+    CHECK(e.renderCamera().on && e.renderCamera().size == QSize(320, 320) && e.renderCamera().fit == 1);
+    // 인쇄용 PDF (콘택트 시트)
+    PrintOptions po; po.cols = 2; po.rows = 2; po.title = "테스트";
+    CHECK(Printing::pageCount(d, po) == 2);   // 6프레임 / 4 = 2쪽
+    CHECK(Printing::exportPdf(d, "/tmp/demo/sheet.pdf", po));
+    CHECK(QFileInfo("/tmp/demo/sheet.pdf").size() > 1000);
+    // 퍼블리시 (ffmpeg 없이 가능한 항목)
+    QDir("/tmp/demo/pub").removeRecursively();
+    MainWindow::PublishOptions pub; pub.mp4 = false; pub.gif = false; pub.png = true;
+    const QStringList made = w.publishTo("/tmp/demo/pub", "시험", pub);
+    CHECK(made.size() >= 5);
+    CHECK(QFileInfo("/tmp/demo/pub/시험.ony").exists());
+    CHECK(QFileInfo("/tmp/demo/pub/시험_콘택트시트.pdf").exists());
+    CHECK(QFileInfo("/tmp/demo/pub/시험_png/시험_0001.png").exists());
+    CHECK(QImage("/tmp/demo/pub/시험_png/시험_0001.png").size() == QSize(320, 320));
+    CHECK(QFileInfo("/tmp/demo/pub/퍼블리시_정보.txt").exists());
+    d->newProject(QSize(320, 200), 12, 24);
+    CHECK(d->renderSize() == QSize(320, 200));    // 새 프로젝트는 렌더 카메라가 꺼진다
+}
+
+static void testRecorder(MainWindow& w) {
+    Document* d = w.document();
+    CanvasWidget* c = w.canvas();
+    d->newProject(QSize(320, 200), 12, 24);
+    c->zoomActual();
+    c->setColorA(Qt::black);
+    { BrushParams bp; bp.size = 5; c->setBrush(bp); }
+    c->setTool(CanvasWidget::Tool::Pen);
+    // 녹화 끔: 기록 없음
+    QTest::mousePress(c, Qt::LeftButton, {}, imgToWidget(c, d, {20, 20}));
+    QTest::mouseMove(c, imgToWidget(c, d, {60, 20}));
+    QTest::mouseRelease(c, Qt::LeftButton, {}, imgToWidget(c, d, {60, 20}));
+    CHECK(d->strokeCount() == 0);
+    d->setRecording(true);
+    d->setCurrentFrame(1);
+    QTest::mousePress(c, Qt::LeftButton, {}, imgToWidget(c, d, {20, 100}));
+    for (int x = 30; x <= 150; x += 10) QTest::mouseMove(c, imgToWidget(c, d, {x, 100}));
+    QTest::mouseRelease(c, Qt::LeftButton, {}, imgToWidget(c, d, {150, 100}));
+    QTest::mousePress(c, Qt::LeftButton, {}, imgToWidget(c, d, {20, 140}));
+    for (int x = 30; x <= 150; x += 10) QTest::mouseMove(c, imgToWidget(c, d, {x, 140}));
+    QTest::mouseRelease(c, Qt::LeftButton, {}, imgToWidget(c, d, {150, 140}));
+    d->setRecording(false);
+    CHECK(d->strokeCount() == 2 && d->strokeCount(1) == 2 && d->strokeCount(0) == 0);
+    // 절반만 그리면 첫 획만, 끝까지 그리면 두 획 모두
+    auto cnt = [](const QImage& im, int y) { int n = 0; for (int x = 0; x < im.width(); ++x) n += qAlpha(im.pixel(x, y)) > 128; return n; };
+    const QImage half = d->renderStrokes(1, 0.5, false), full = d->renderStrokes(1, 1.0, false);
+    CHECK(cnt(half, 100) > 20 && cnt(half, 140) == 0);
+    CHECK(cnt(full, 100) > 100 && cnt(full, 140) > 100);
+    CHECK(cnt(d->renderStrokes(1, 0.25, false), 100) < cnt(half, 100));
+    // 프레임으로 풀어 쓰기
+    const int before = d->layerCount();
+    const int l = d->strokesToFrames(1, 2, 6, false);
+    CHECK(l == before && d->layerCount() == before + 1);
+    CHECK(d->keyIndexAt(l, 2) == 2 && d->keyIndexAt(l, 7) == 7);
+    CHECK(cnt(d->keyImage(l, 2), 100) < cnt(d->keyImage(l, 7), 100) + 1);
+    CHECK(cnt(d->keyImage(l, 7), 140) > 100);
+    // 저장/불러오기
+    CHECK(d->saveCopy("/tmp/demo/rec.ony"));
+    Document e;
+    CHECK(e.load("/tmp/demo/rec.ony"));
+    CHECK(e.strokeCount() == 2 && e.strokes()[0].pts.size() >= 10);
+    CHECK(cnt(e.renderStrokes(1, 1.0, true), 140) > 100);
+    d->clearStrokes(1);
+    CHECK(d->strokeCount() == 0);
+    d->setCurrentFrame(0);
+    d->newProject(QSize(320, 200), 12, 24);
 }
 
 static void testCanvas(MainWindow& w) {
@@ -594,8 +1010,19 @@ int main(int argc, char** argv) {
     QTest::qWait(200);
     testClipsAndPlay(w);
     testResizeAndNext(w);
+    testSequenceExport();
+    testLightTable();
     testVideo();
+    testPingPong(w);
     testShortcuts(w);
+    testPuppet();
+    testTimelineZoom();
+    testCutDashBrush();
+    testFxCategories(w);
+    testImageMenu();
+    testRepeat();
+    testStretch();
+    testCameraEase();
     { // 클립이 많아져도 검색창이 밀리지 않고, 오른쪽 패널을 넓게 끌 수 있다
         QAction* newClipAct = nullptr;
         for (auto* a : w.findChildren<QAction*>()) if (a->text() == "새 클립" && a->parent() && qobject_cast<QMenu*>(a->parent())) newClipAct = a;
@@ -616,6 +1043,8 @@ int main(int argc, char** argv) {
         }
         w.grab().save("/tmp/demo/10_clips.png");
     }
+    testRecorder(w);
+    testRenderPrintPublish(w);
     testCanvas(w);
 
     // 스크린샷 (레이어/프레임을 더 만들어 타임라인이 보이도록)

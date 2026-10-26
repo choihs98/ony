@@ -168,6 +168,8 @@ private:
     QCheckBox* enable_;
     QDoubleSpinBox *x_, *y_, *scale_, *rot_;
     QLabel* info_;
+    class QComboBox* ease_ = nullptr;
+    class QListWidget* keys_ = nullptr;
     bool syncing_ = false;
 };
 

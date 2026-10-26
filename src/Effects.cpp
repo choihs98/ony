@@ -1,6 +1,9 @@
 #include "Effects.h"
 #include <QVector>
+#include <QPainter>
+#include <QRandomGenerator>
 #include <algorithm>
+#include <cmath>
 
 namespace {
 template <typename F>
@@ -73,6 +76,379 @@ QImage boxBlur(const QImage& in, int r) {
     return dst;
 }
 
+
+namespace {
+// 프리멀티플라이드 ARGB 이미지에서 쌍선형 샘플링
+QRgb sampleBilinear(const QImage& im, double x, double y) {
+    if (x < 0 || y < 0 || x > im.width() - 1 || y > im.height() - 1) return 0;
+    const int x0 = int(x), y0 = int(y);
+    const int x1 = std::min(x0 + 1, im.width() - 1), y1 = std::min(y0 + 1, im.height() - 1);
+    const double fx = x - x0, fy = y - y0;
+    const QRgb* r0 = reinterpret_cast<const QRgb*>(im.constScanLine(y0));
+    const QRgb* r1 = reinterpret_cast<const QRgb*>(im.constScanLine(y1));
+    auto mix = [&](int shift) {
+        const double a = (r0[x0] >> shift & 255) * (1 - fx) + (r0[x1] >> shift & 255) * fx;
+        const double b = (r1[x0] >> shift & 255) * (1 - fx) + (r1[x1] >> shift & 255) * fx;
+        return int(a * (1 - fy) + b * fy + 0.5);
+    };
+    return qRgba(mix(16), mix(8), mix(0), mix(24));
+}
+
+template <typename F>
+QImage warpImage(const QImage& in, F map) {
+    const QImage src = in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    QImage dst(src.size(), QImage::Format_ARGB32_Premultiplied);
+    for (int y = 0; y < dst.height(); ++y) {
+        QRgb* d = reinterpret_cast<QRgb*>(dst.scanLine(y));
+        for (int x = 0; x < dst.width(); ++x) {
+            double sx = x, sy = y;
+            map(sx, sy);
+            d[x] = sampleBilinear(src, sx, sy);
+        }
+    }
+    return dst;
+}
+
+void rgb2hsl(int r, int g, int b, double& h, double& s, double& l) {
+    const double R = r / 255.0, G = g / 255.0, B = b / 255.0;
+    const double mx = std::max({R, G, B}), mn = std::min({R, G, B});
+    l = (mx + mn) / 2;
+    const double d = mx - mn;
+    if (d < 1e-9) { h = 0; s = 0; return; }
+    s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+    if (mx == R) h = (G - B) / d + (G < B ? 6 : 0);
+    else if (mx == G) h = (B - R) / d + 2;
+    else h = (R - G) / d + 4;
+    h /= 6;
+}
+double hue2rgb(double p, double q, double t) {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1.0 / 6) return p + (q - p) * 6 * t;
+    if (t < 0.5) return q;
+    if (t < 2.0 / 3) return p + (q - p) * (2.0 / 3 - t) * 6;
+    return p;
+}
+QRgb hsl2rgb(double h, double s, double l, int a) {
+    double r, g, b;
+    if (s < 1e-9) r = g = b = l;
+    else {
+        const double q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+        r = hue2rgb(p, q, h + 1.0 / 3); g = hue2rgb(p, q, h); b = hue2rgb(p, q, h - 1.0 / 3);
+    }
+    return qRgba(clamp255(int(r * 255 + 0.5)), clamp255(int(g * 255 + 0.5)), clamp255(int(b * 255 + 0.5)), a);
+}
+
+// 3x3 컨볼루션 (스트레이트 알파 RGB 에만 적용, 알파 유지)
+QImage convolve3(const QImage& in, const double k[9], double bias, bool onAlpha) {
+    const QImage s = in.convertToFormat(QImage::Format_ARGB32);
+    QImage o = s;
+    const int w = s.width(), h = s.height();
+    for (int y = 0; y < h; ++y) {
+        QRgb* d = reinterpret_cast<QRgb*>(o.scanLine(y));
+        for (int x = 0; x < w; ++x) {
+            double a = 0, r = 0, g = 0, b = 0;
+            for (int j = -1; j <= 1; ++j)
+                for (int i = -1; i <= 1; ++i) {
+                    const int xx = std::clamp(x + i, 0, w - 1), yy = std::clamp(y + j, 0, h - 1);
+                    const QRgb p = reinterpret_cast<const QRgb*>(s.constScanLine(yy))[xx];
+                    const double kv = k[(j + 1) * 3 + (i + 1)];
+                    a += qAlpha(p) * kv; r += qRed(p) * kv; g += qGreen(p) * kv; b += qBlue(p) * kv;
+                }
+            const int oa = onAlpha ? clamp255(int(a + bias)) : qAlpha(d[x]);
+            d[x] = qRgba(clamp255(int(r + bias)), clamp255(int(g + bias)), clamp255(int(b + bias)), oa);
+        }
+    }
+    return o.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+}
+
+QImage directionalBlur(const QImage& in, int len, bool horiz) {
+    if (len < 1) return in;
+    const QImage src = in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    QImage dst(src.size(), QImage::Format_ARGB32_Premultiplied);
+    const int w = src.width(), h = src.height();
+    for (int y = 0; y < h; ++y) {
+        QRgb* d = reinterpret_cast<QRgb*>(dst.scanLine(y));
+        for (int x = 0; x < w; ++x) {
+            int a = 0, r = 0, g = 0, b = 0, n = 0;
+            for (int t = -len; t <= len; ++t) {
+                const int xx = horiz ? x + t : x, yy = horiz ? y : y + t;
+                if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+                const QRgb p = reinterpret_cast<const QRgb*>(src.constScanLine(yy))[xx];
+                a += qAlpha(p); r += qRed(p); g += qGreen(p); b += qBlue(p); ++n;
+            }
+            d[x] = n ? qRgba(r / n, g / n, b / n, a / n) : 0;
+        }
+    }
+    return dst;
+}
+
+// 알파 마스크를 흐리게 → 그림자/외곽선에 사용
+QImage alphaOnly(const QImage& in, QRgb color) {
+    QImage o = in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    for (int y = 0; y < o.height(); ++y) {
+        QRgb* s = reinterpret_cast<QRgb*>(o.scanLine(y));
+        for (int x = 0; x < o.width(); ++x) {
+            const int a = qAlpha(s[x]);
+            s[x] = qRgba(qRed(color) * a / 255, qGreen(color) * a / 255, qBlue(color) * a / 255, a);
+        }
+    }
+    return o;
+}
+}
+
+
+QImage gaussBlur(const QImage& in, int r) {
+    if (r < 1) return in;
+    return boxBlur(boxBlur(boxBlur(in, std::max(1, r / 2)), std::max(1, r / 2)), std::max(1, r / 2 + 1));
+}
+QImage contrast(const QImage& in, int amount) {
+    const double f = (259.0 * (amount + 255)) / (255.0 * (259 - amount));
+    return mapStraight(in, [f](QRgb c) {
+        return qRgba(clamp255(int(f * (qRed(c) - 128) + 128)), clamp255(int(f * (qGreen(c) - 128) + 128)),
+                     clamp255(int(f * (qBlue(c) - 128) + 128)), qAlpha(c));
+    });
+}
+QImage saturation(const QImage& in, int amount) {
+    return mapStraight(in, [amount](QRgb c) {
+        double h, s, l;
+        rgb2hsl(qRed(c), qGreen(c), qBlue(c), h, s, l);
+        s = std::clamp(s * (100 + amount) / 100.0, 0.0, 1.0);
+        return hsl2rgb(h, s, l, qAlpha(c));
+    });
+}
+QImage hueShift(const QImage& in, int degrees) {
+    return mapStraight(in, [degrees](QRgb c) {
+        double h, s, l;
+        rgb2hsl(qRed(c), qGreen(c), qBlue(c), h, s, l);
+        h = std::fmod(h + degrees / 360.0 + 2.0, 1.0);
+        return hsl2rgb(h, s, l, qAlpha(c));
+    });
+}
+QImage sepia(const QImage& in, int) {
+    return mapStraight(in, [](QRgb c) {
+        const int r = qRed(c), g = qGreen(c), b = qBlue(c);
+        return qRgba(clamp255(int(r * .393 + g * .769 + b * .189)), clamp255(int(r * .349 + g * .686 + b * .168)),
+                     clamp255(int(r * .272 + g * .534 + b * .131)), qAlpha(c));
+    });
+}
+QImage posterize(const QImage& in, int levels) {
+    levels = std::clamp(levels, 2, 16);
+    return mapStraight(in, [levels](QRgb c) {
+        auto q = [levels](int v) { return clamp255(int(std::round(v * (levels - 1) / 255.0) * 255.0 / (levels - 1))); };
+        return qRgba(q(qRed(c)), q(qGreen(c)), q(qBlue(c)), qAlpha(c));
+    });
+}
+QImage threshold(const QImage& in, int t) {
+    return mapStraight(in, [t](QRgb c) {
+        const int g = (qRed(c) * 299 + qGreen(c) * 587 + qBlue(c) * 114) / 1000;
+        const int v = g >= t ? 255 : 0;
+        return qRgba(v, v, v, qAlpha(c));
+    });
+}
+QImage wave(const QImage& in, int amp) {
+    const double period = std::max(20.0, in.height() / 6.0);
+    return warpImage(in, [&](double& x, double& y) { x += amp * std::sin(y / period * 2 * M_PI); });
+}
+QImage swirl(const QImage& in, int strength) {
+    const double cx = in.width() / 2.0, cy = in.height() / 2.0, R = std::min(cx, cy);
+    const double k = strength / 100.0 * 3.0;
+    return warpImage(in, [&](double& x, double& y) {
+        const double dx = x - cx, dy = y - cy, d = std::hypot(dx, dy);
+        if (d >= R) return;
+        const double ang = k * (1 - d / R) * (1 - d / R);
+        const double c = std::cos(ang), s = std::sin(ang);
+        x = cx + dx * c - dy * s;
+        y = cy + dx * s + dy * c;
+    });
+}
+QImage bulge(const QImage& in, int strength) {
+    const double cx = in.width() / 2.0, cy = in.height() / 2.0, R = std::min(cx, cy);
+    const double k = strength / 100.0;
+    return warpImage(in, [&](double& x, double& y) {
+        const double dx = x - cx, dy = y - cy, d = std::hypot(dx, dy);
+        if (d >= R || d < 1e-6) return;
+        const double n = d / R;
+        const double nn = k >= 0 ? std::pow(n, 1.0 + k) : std::pow(n, 1.0 / (1.0 - k));
+        x = cx + dx / d * nn * R;
+        y = cy + dy / d * nn * R;
+    });
+}
+QImage keyColor(const QImage& in, int mode, int tol) {
+    return mapStraight(in, [mode, tol](QRgb c) {
+        const int r = qRed(c), g = qGreen(c), b = qBlue(c);
+        bool hit = false;
+        if (mode == 0) hit = std::min({r, g, b}) >= 255 - tol;
+        else if (mode == 1) hit = std::max({r, g, b}) <= tol;
+        else hit = g > r + tol / 2 && g > b + tol / 2 && g > 60;
+        return hit ? qRgba(r, g, b, 0) : c;
+    });
+}
+QImage noise(const QImage& in, int amount) {
+    QRandomGenerator rng(12345);
+    return mapStraight(in, [&](QRgb c) {
+        const int n = int(rng.bounded(2 * amount + 1)) - amount;
+        return qRgba(clamp255(qRed(c) + n), clamp255(qGreen(c) + n), clamp255(qBlue(c) + n), qAlpha(c));
+    });
+}
+QImage vignette(const QImage& in, int amount) {
+    QImage o = in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    const double cx = o.width() / 2.0, cy = o.height() / 2.0, R = std::hypot(cx, cy);
+    for (int y = 0; y < o.height(); ++y) {
+        QRgb* s = reinterpret_cast<QRgb*>(o.scanLine(y));
+        for (int x = 0; x < o.width(); ++x) {
+            const double d = std::hypot(x - cx, y - cy) / R;
+            const double f = std::clamp(1.0 - amount / 100.0 * d * d, 0.0, 1.0);
+            s[x] = qRgba(int(qRed(s[x]) * f), int(qGreen(s[x]) * f), int(qBlue(s[x]) * f), qAlpha(s[x]));
+        }
+    }
+    return o;
+}
+QImage dropShadow(const QImage& in, int dist) {
+    QImage sh = gaussBlur(alphaOnly(in, qRgba(0, 0, 0, 255)), std::max(1, dist / 2));
+    QImage o(in.size(), QImage::Format_ARGB32_Premultiplied);
+    o.fill(Qt::transparent);
+    QPainter p(&o);
+    p.setOpacity(0.6);
+    p.drawImage(dist, dist, sh);
+    p.setOpacity(1.0);
+    p.drawImage(0, 0, in);
+    return o;
+}
+QImage pixelate(const QImage& in, int block) {
+    block = std::max(2, block);
+    const QImage s = in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    const QSize small(std::max(1, s.width() / block), std::max(1, s.height() / block));
+    return s.scaled(small, Qt::IgnoreAspectRatio, Qt::SmoothTransformation).scaled(s.size(), Qt::IgnoreAspectRatio, Qt::FastTransformation);
+}
+QImage emboss(const QImage& in, int) {
+    static const double k[9] = {-2, -1, 0, -1, 1, 1, 0, 1, 2};
+    return convolve3(in, k, 128, false);
+}
+QImage edge(const QImage& in, int) {
+    static const double k[9] = {-1, -1, -1, -1, 8, -1, -1, -1, -1};
+    return convolve3(in, k, 0, false);
+}
+QImage sharpen(const QImage& in, int amount) {
+    const double a = amount / 100.0;
+    const double k[9] = {0, -a, 0, -a, 1 + 4 * a, -a, 0, -a, 0};
+    return convolve3(in, k, 0, false);
+}
+QImage outline(const QImage& in, int width) {
+    width = std::clamp(width, 1, 20);
+    const QImage src = in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    QImage o(src.size(), QImage::Format_ARGB32_Premultiplied);
+    o.fill(Qt::transparent);
+    const QImage mask = alphaOnly(src, qRgba(0, 0, 0, 255));
+    QPainter p(&o);
+    for (int a = 0; a < 16; ++a) {
+        const double ang = a * M_PI / 8;
+        p.drawImage(QPointF(std::cos(ang) * width, std::sin(ang) * width), mask);
+    }
+    p.drawImage(0, 0, src);
+    return o;
+}
+QImage echo(const QImage& in, int dist) {
+    QImage o(in.size(), QImage::Format_ARGB32_Premultiplied);
+    o.fill(Qt::transparent);
+    QPainter p(&o);
+    for (int i = 3; i >= 1; --i) {
+        p.setOpacity(0.25 * (4 - i) / 3.0 + 0.1);
+        p.drawImage(-dist * i, 0, in);
+    }
+    p.setOpacity(1.0);
+    p.drawImage(0, 0, in);
+    return o;
+}
+
+QImage crossfade(const QImage& a, const QImage& b, double t) {
+    QImage o(a.size(), QImage::Format_ARGB32_Premultiplied);
+    o.fill(Qt::transparent);
+    QPainter p(&o);
+    p.setOpacity(1.0 - t);
+    p.drawImage(0, 0, a);
+    p.setOpacity(t);
+    p.drawImage(0, 0, b);
+    return o;
+}
+QImage wipe(const QImage& a, const QImage& b, double t, int dir) {
+    QImage o = a.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    QPainter p(&o);
+    const int w = o.width(), h = o.height();
+    QRect r;
+    switch (dir) {
+    case 0: r = QRect(0, 0, int(w * t), h); break;
+    case 1: r = QRect(w - int(w * t), 0, int(w * t), h); break;
+    case 2: r = QRect(0, 0, w, int(h * t)); break;
+    default: r = QRect(0, h - int(h * t), w, int(h * t)); break;
+    }
+    p.setCompositionMode(QPainter::CompositionMode_Source);
+    p.drawImage(r, b, r);
+    return o;
+}
+QImage slide(const QImage& a, const QImage& b, double t) {
+    QImage o(a.size(), QImage::Format_ARGB32_Premultiplied);
+    o.fill(Qt::transparent);
+    QPainter p(&o);
+    const int dx = int(a.width() * t);
+    p.drawImage(dx, 0, a);
+    p.drawImage(dx - a.width(), 0, b);
+    return o;
+}
+
+ParamInfo paramInfo(Type t) {
+    switch (t) {
+    case Type::Brightness: return {true, -100, 100, 24, QStringLiteral("밝기")};
+    case Type::Blur: return {true, 1, 16, 4, QStringLiteral("반경")};
+    case Type::GaussBlur: return {true, 1, 32, 6, QStringLiteral("반경")};
+    case Type::Contrast: return {true, -100, 100, 30, QStringLiteral("대비")};
+    case Type::Saturation: return {true, -100, 200, 40, QStringLiteral("채도 (%)")};
+    case Type::HueShift: return {true, -180, 180, 30, QStringLiteral("색상 이동 (도)")};
+    case Type::Posterize: return {true, 2, 16, 4, QStringLiteral("단계")};
+    case Type::Threshold: return {true, 1, 254, 128, QStringLiteral("기준값")};
+    case Type::Wave: return {true, 1, 60, 10, QStringLiteral("진폭")};
+    case Type::Swirl: return {true, -100, 100, 50, QStringLiteral("세기")};
+    case Type::Bulge: return {true, -90, 90, 50, QStringLiteral("세기")};
+    case Type::KeyWhite: return {true, 0, 120, 20, QStringLiteral("허용 오차")};
+    case Type::KeyBlack: return {true, 0, 120, 20, QStringLiteral("허용 오차")};
+    case Type::KeyGreen: return {true, 10, 200, 60, QStringLiteral("허용 오차")};
+    case Type::MotionBlurH: case Type::MotionBlurV: return {true, 1, 40, 8, QStringLiteral("길이")};
+    case Type::Echo: return {true, 1, 60, 8, QStringLiteral("간격")};
+    case Type::Noise: return {true, 1, 120, 30, QStringLiteral("양")};
+    case Type::Vignette: return {true, 1, 100, 60, QStringLiteral("세기")};
+    case Type::DropShadow: return {true, 1, 60, 8, QStringLiteral("거리")};
+    case Type::Pixelate: return {true, 2, 64, 8, QStringLiteral("블록 크기")};
+    case Type::Outline: return {true, 1, 20, 2, QStringLiteral("두께")};
+    case Type::Sharpen: return {true, 10, 300, 100, QStringLiteral("세기")};
+    default: return {};
+    }
+}
+
+QString categoryOf(Type t) {
+    switch (t) {
+    case Type::Blur: case Type::GaussBlur: return QStringLiteral("블러");
+    case Type::Invert: case Type::Grayscale: case Type::Brightness: case Type::Contrast: case Type::Saturation:
+    case Type::HueShift: case Type::Sepia: case Type::Posterize: case Type::Threshold: return QStringLiteral("색");
+    case Type::Wave: case Type::Swirl: case Type::Bulge: return QStringLiteral("왜곡");
+    case Type::KeyWhite: case Type::KeyBlack: case Type::KeyGreen: return QStringLiteral("키잉");
+    case Type::MotionBlurH: case Type::MotionBlurV: case Type::Echo: return QStringLiteral("모션");
+    case Type::Noise: case Type::Vignette: case Type::DropShadow: return QStringLiteral("렌더링");
+    default: return QStringLiteral("스타일화");
+    }
+}
+
+QStringList categories() {
+    return {QStringLiteral("블러"), QStringLiteral("색"), QStringLiteral("왜곡"), QStringLiteral("키잉"),
+            QStringLiteral("모션"), QStringLiteral("렌더링"), QStringLiteral("스타일화")};
+}
+
+QVector<Type> typesIn(const QString& category) {
+    QVector<Type> v;
+    for (int i = 0; i <= int(Type::Last); ++i)
+        if (categoryOf(Type(i)) == category) v.push_back(Type(i));
+    return v;
+}
+
 QImage flipH(const QImage& in) { return in.mirrored(true, false); }
 QImage flipV(const QImage& in) { return in.mirrored(false, true); }
 
@@ -82,6 +458,30 @@ QImage apply(const QImage& in, const Item& item) {
     case Type::Grayscale: return grayscale(in);
     case Type::Brightness: return brightness(in, item.param);
     case Type::Blur: return boxBlur(in, std::max(1, item.param));
+    case Type::GaussBlur: return gaussBlur(in, item.param);
+    case Type::Contrast: return contrast(in, item.param);
+    case Type::Saturation: return saturation(in, item.param);
+    case Type::HueShift: return hueShift(in, item.param);
+    case Type::Sepia: return sepia(in, 0);
+    case Type::Posterize: return posterize(in, item.param);
+    case Type::Threshold: return threshold(in, item.param);
+    case Type::Wave: return wave(in, item.param);
+    case Type::Swirl: return swirl(in, item.param);
+    case Type::Bulge: return bulge(in, item.param);
+    case Type::KeyWhite: return keyColor(in, 0, item.param);
+    case Type::KeyBlack: return keyColor(in, 1, item.param);
+    case Type::KeyGreen: return keyColor(in, 2, item.param);
+    case Type::MotionBlurH: return directionalBlur(in, item.param, true);
+    case Type::MotionBlurV: return directionalBlur(in, item.param, false);
+    case Type::Echo: return echo(in, item.param);
+    case Type::Noise: return noise(in, item.param);
+    case Type::Vignette: return vignette(in, item.param);
+    case Type::DropShadow: return dropShadow(in, item.param);
+    case Type::Pixelate: return pixelate(in, item.param);
+    case Type::Emboss: return emboss(in, 0);
+    case Type::Edge: return edge(in, 0);
+    case Type::Outline: return outline(in, item.param);
+    case Type::Sharpen: return sharpen(in, item.param);
     }
     return in;
 }
@@ -92,6 +492,30 @@ QString typeName(Type t) {
     case Type::Grayscale: return QStringLiteral("흑백");
     case Type::Brightness: return QStringLiteral("밝기");
     case Type::Blur: return QStringLiteral("블러");
+    case Type::GaussBlur: return QStringLiteral("가우시안 블러");
+    case Type::Contrast: return QStringLiteral("대비");
+    case Type::Saturation: return QStringLiteral("채도");
+    case Type::HueShift: return QStringLiteral("색상 이동");
+    case Type::Sepia: return QStringLiteral("세피아");
+    case Type::Posterize: return QStringLiteral("포스터화");
+    case Type::Threshold: return QStringLiteral("이진화");
+    case Type::Wave: return QStringLiteral("물결");
+    case Type::Swirl: return QStringLiteral("소용돌이");
+    case Type::Bulge: return QStringLiteral("볼록/오목");
+    case Type::KeyWhite: return QStringLiteral("흰색 제거");
+    case Type::KeyBlack: return QStringLiteral("검정 제거");
+    case Type::KeyGreen: return QStringLiteral("초록 제거");
+    case Type::MotionBlurH: return QStringLiteral("모션 블러 (가로)");
+    case Type::MotionBlurV: return QStringLiteral("모션 블러 (세로)");
+    case Type::Echo: return QStringLiteral("잔상");
+    case Type::Noise: return QStringLiteral("노이즈");
+    case Type::Vignette: return QStringLiteral("비네트");
+    case Type::DropShadow: return QStringLiteral("그림자");
+    case Type::Pixelate: return QStringLiteral("모자이크");
+    case Type::Emboss: return QStringLiteral("엠보스");
+    case Type::Edge: return QStringLiteral("윤곽 검출");
+    case Type::Outline: return QStringLiteral("외곽선");
+    case Type::Sharpen: return QStringLiteral("선명하게");
     }
     return QString();
 }

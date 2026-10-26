@@ -1,6 +1,7 @@
 #pragma once
 #include <QColor>
 #include <QImage>
+#include <QPoint>
 #include <QPointF>
 #include <QRandomGenerator>
 #include <QSize>
@@ -29,6 +30,7 @@ struct BrushPreset {
     bool aliased;    // 안티앨리어싱 끔 (연필)
     int aspect;      // 납작함: 짧은 축 비율 % (100 = 원/정사각)
     int angle;       // 납작한 붓의 각도(도)
+    bool follow = false; // 획 방향으로 스탬프를 회전 (파선)
 };
 
 int brushPresetCount();
@@ -39,6 +41,7 @@ struct BrushDabCache {
     QImage img;
     int preset = -1, d = -1, hardness = -1;
     QRgb color = 0;
+    double dir = 0;  // 마지막 획 방향(도)
 };
 
 // a→b 구간에 스탬프를 찍는다. carry 는 구간 사이 남은 거리.
@@ -48,6 +51,6 @@ void brushStampAlong(QImage& buf, const BrushParams& params, const QColor& color
 void brushStampAt(QImage& buf, const BrushParams& params, const QColor& color, const QPointF& pos, double pressure,
                   QRandomGenerator& rng, BrushDabCache& cache);
 // 스트로크가 끝난 버퍼에 질감을 입힌다 (grain 0 이면 그대로)
-void brushApplyGrain(QImage& buf, int grain);
+void brushApplyGrain(QImage& buf, int grain, QPoint origin = QPoint());   // origin: buf 왼쪽 위의 실제 좌표 (질감 무늬를 맞춘다)
 // 미리보기: 물결 모양 스트로크를 그려서 돌려준다 (투명 배경)
 QImage brushPreview(const BrushParams& params, const QColor& color, QSize size);

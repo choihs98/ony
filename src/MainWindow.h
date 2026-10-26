@@ -37,7 +37,16 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget* parent = nullptr);
+    void openLastProject();
     Document* document() const { return doc_; }
+    struct PublishOptions {
+        bool mp4 = true, gif = false, png = false, pdf = true, project = true, thumb = true;
+        int quality = 1;
+        std::function<bool(int, int)> progress;
+    };
+    QStringList publishTo(const QString& folder, const QString& name, const PublishOptions& po);
+    bool runTransition(int layer, int f0, int n, int kind);
+    bool lightTableOn() const { return lightAct_ && lightAct_->isChecked(); }
     CanvasWidget* canvas() const { return canvas_; }
     void applyTheme(int index);
 
@@ -88,6 +97,11 @@ private:
     void saveRooms();
     void loadRooms();
     void addDockToggle(class QToolBar* tb, QDockWidget* dock, const QString& iconName, const QString& tip);
+    void publishDialog();
+    void printDialog();
+    void renderCameraDialog();
+    void strokeAnimationDialog();
+    void transitionDialog(int kind, const QString& name);
     void applyEffect(const QString& text, const std::function<QImage(const QImage&)>& fn);
     void showHistory(const QPoint& globalPos);
     void applyHistory(const HistEntry& e);
@@ -97,6 +111,11 @@ private:
     void exportXdtsDialog();
     void importSequenceDialog();
     void newClip();
+    void openPath(const QString& path);
+    void setupAutosave();
+    void addRecent(const QString& path);
+    QString backupDir() const;
+    QString templateDir() const;
     void switchClip(int idx);
     void renameClip();
     void deleteClip();
@@ -137,6 +156,12 @@ private:
     QImage clip_;
     int cursorX_ = 0, cursorY_ = 0;
     class QScrollArea* clipScroll_ = nullptr;
+    QToolButton* pingBtn_ = nullptr;
+    class QComboBox* speedBox_ = nullptr;
+    int playDir_ = 1;
+    QAction* recAct_ = nullptr;
+    QStringList lastPublishErrors_;
+    class QTimer* autosaveTimer_ = nullptr;
     int brushRow_ = 0;
     int lastPen_ = 0;
     QList<HistEntry> history_;
@@ -170,6 +195,7 @@ private:
     QDockWidget* dockGuides_ = nullptr;
     QDockWidget* dockLight_ = nullptr;
     QDockWidget* dockRemote_ = nullptr;
+    QDockWidget* dockFlip_ = nullptr;
     QDockWidget* dockShare_ = nullptr;
     QSplitter* bottomSplit_ = nullptr;
     QComboBox* roomCombo_ = nullptr;

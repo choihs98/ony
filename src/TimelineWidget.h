@@ -12,6 +12,7 @@ public:
     static constexpr int kCell = 40;
     static constexpr int kHeader = 22;
     static constexpr int kRowH = 54;
+    static constexpr int kRowCompact = 24;
     static constexpr int kNameW = 280;
 
     explicit TimelineWidget(Document* doc, QWidget* parent = nullptr);
@@ -19,11 +20,17 @@ public:
     QSize minimumSizeHint() const override;
     void clearRange();
     void setRange(int a, int b) { rangeA_ = a; rangeB_ = b; update(); emit rangeChanged(a, b); }
+    int cell() const { return cellW_; }
+    int rowHeight() const { return rowH_; }
+    bool compact() const { return compact_; }
+    void setCellWidth(int w);
+    void setCompact(bool on);
     int rangeStart() const { return rangeA_; }
     int rangeEnd() const { return rangeB_; }
 
 signals:
     void rangeChanged(int a, int b); // a < 0 이면 구간 없음
+    void zoomChanged();
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -32,8 +39,12 @@ protected:
     void mouseReleaseEvent(QMouseEvent*) override;
     void mouseDoubleClickEvent(QMouseEvent*) override;
     void contextMenuEvent(QContextMenuEvent*) override;
+    void wheelEvent(QWheelEvent*) override;
 
 private:
+    int cellW_ = kCell;
+    int rowH_ = kRowH;
+    bool compact_ = false;
     int rowToLayer(int row) const;
     int layerToRow(int layer) const;
     void pick(const QPoint& pos, bool pressed);

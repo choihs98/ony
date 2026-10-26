@@ -6,6 +6,7 @@
 #include "Effects.h"
 #include "Style.h"
 #include "VideoExport.h"
+#include "Print.h"
 #include "Panels.h"
 #include "TimelineWidget.h"
 #include "Warp.h"
@@ -35,9 +36,15 @@
 #include <QMessageBox>
 #include <QPageSize>
 #include <QProgressDialog>
+#include <QStringConverter>
+#include <QTextStream>
 #include <QPainter>
 #include <QPalette>
 #include <QPdfWriter>
+#ifdef ONY_HAS_PRINT
+#include <QPrintDialog>
+#include <QPrinter>
+#endif
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
@@ -51,6 +58,9 @@
 #include <QImageReader>
 #include <QMouseEvent>
 #include <QShortcut>
+#include <QStandardItemModel>
+#include <QColorDialog>
+#include <QStandardPaths>
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QToolBar>
@@ -78,11 +88,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), doc_(new Document
         fpsSpin_->blockSignals(true);
         fpsSpin_->setValue(doc_->fps());
         fpsSpin_->blockSignals(false);
-        playTimer_.setInterval(1000 / doc_->fps());
+        playTimer_.setInterval(std::max(1, int(1000 / (doc_->fps() * (speedBox_ ? speedBox_->currentData().toDouble() : 1.0)))));
     });
     connect(doc_, &Document::currentChanged, this, [this] {
         updateInfo();
-        const int x = TimelineWidget::kNameW + doc_->currentFrame() * TimelineWidget::kCell;
+        const int x = TimelineWidget::kNameW + doc_->currentFrame() * timeline_->cell();
         tlScroll_->ensureVisible(x, 0, 60, 0);
     });
     connect(&playTimer_, &QTimer::timeout, this, &MainWindow::stepPlay);
@@ -90,6 +100,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), doc_(new Document
 
     auto& SC = Shortcuts::instance();
     SC.add(this, "색상", "A/B 색 바꾸기", QKeySequence(Qt::Key_X), [this] { color_->swapColors(); });
+    SC.add(this, "타임라인", "프레임 추가", QKeySequence(Qt::CTRL | Qt::Key_Insert), [this] {
+        doc_->insertFrame(doc_->currentFrame() + 1);
+        gotoFrame(doc_->currentFrame() + 1);
+    });
     SC.add(this, "타임라인", "이전 프레임", QKeySequence(Qt::Key_Left), [this] { gotoFrame(doc_->currentFrame() - 1); });
     SC.add(this, "타임라인", "다음 프레임", QKeySequence(Qt::Key_Right), [this] { nextFrameAction(false); });
     SC.add(this, "타임라인", "다음 이미지 (새 이미지 만들기)", QKeySequence("Shift+Right"), [this] { nextFrameAction(true); });
@@ -100,7 +114,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), doc_(new Document
 
     updateTitle();
     updateInfo();
-    applyRoomDefault(0);
+    {
+        QSettings st("Ony", "Ony");
+        const int room = std::clamp(st.value("start/room", 0).toInt(), 0, std::max(0, roomCombo_->count() - 1));
+        QSignalBlocker rb(roomCombo_);
+        roomCombo_->setCurrentIndex(room);
+        applyRoomDefault(room);
+        if (soundBtn_ && !st.value("sound/on", true).toBool()) soundBtn_->setChecked(false);
+    }
+    setupAutosave();
     statusBar()->showMessage(QStringLiteral("준비"));
 }
 
@@ -125,6 +147,22 @@ void MainWindow::preferencesDialog() {
     undo->setValue(st.value("undoLevels", 60).toInt());
     gf->addRow("실행 취소 단계", undo);
     tabs->addTab(gen, "일반");
+    // 저장
+    auto* sav = new QWidget;
+    auto* sf = new QFormLayout(sav);
+    auto* autosave = new QSpinBox;
+    autosave->setRange(0, 120);
+    autosave->setSpecialValueText("끔");
+    autosave->setSuffix(" 분마다");
+    autosave->setValue(st.value("save/autosaveMin", 5).toInt());
+    auto* backups = new QSpinBox;
+    backups->setRange(1, 99);
+    backups->setSuffix(" 개");
+    backups->setValue(st.value("save/backupCount", 10).toInt());
+    sf->addRow("자동 백업", autosave);
+    sf->addRow("저장할 때 보관할 백업 수", backups);
+    sf->addRow(new QLabel("자동 백업은 작업 중인 프로젝트를 백업 폴더에 사본으로 저장합니다\n(원본 파일은 건드리지 않습니다)."));
+    tabs->addTab(sav, "저장");
     // 화면
     auto* disp = new QWidget;
     auto* df = new QFormLayout(disp);
@@ -157,6 +195,25 @@ void MainWindow::preferencesDialog() {
     mf->addWidget(new QLabel(QString("현재 프로젝트 이미지: %1 개\n사용 메모리: 약 %2 MB").arg(imgs).arg(bytes / (1024 * 1024))));
     mf->addStretch();
     tabs->addTab(mem, "메모리 · 캐시");
+    // 사운드
+    auto* snd = new QWidget;
+    auto* sdf = new QFormLayout(snd);
+    auto* soundOn = new QCheckBox("프로그램을 시작할 때 소리 켜기");
+    soundOn->setChecked(st.value("sound/on", true).toBool());
+    sdf->addRow(soundOn);
+    sdf->addRow(new QLabel("트랙별 음량·위치는 타임라인 아래 \"소리\" 버튼에서 설정합니다."));
+    tabs->addTab(snd, "사운드");
+    // 시작
+    auto* sta = new QWidget;
+    auto* stf = new QFormLayout(sta);
+    auto* openLast = new QCheckBox("시작할 때 마지막 프로젝트 열기");
+    openLast->setChecked(st.value("start/openLast", false).toBool());
+    auto* startRoom = new QComboBox;
+    for (int i = 0; i < roomCombo_->count(); ++i) startRoom->addItem(roomCombo_->itemText(i));
+    startRoom->setCurrentIndex(std::clamp(st.value("start/room", 0).toInt(), 0, startRoom->count() - 1));
+    stf->addRow(openLast);
+    stf->addRow("시작 룸", startRoom);
+    tabs->addTab(sta, "시작");
     auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
@@ -164,6 +221,12 @@ void MainWindow::preferencesDialog() {
     if (dlg.exec() != QDialog::Accepted) return;
     st.setValue("theme", theme->currentIndex());
     st.setValue("undoLevels", undo->value());
+    st.setValue("save/autosaveMin", autosave->value());
+    st.setValue("save/backupCount", backups->value());
+    st.setValue("sound/on", soundOn->isChecked());
+    st.setValue("start/openLast", openLast->isChecked());
+    st.setValue("start/room", startRoom->currentIndex());
+    setupAutosave();
     applyTheme(theme->currentIndex());
     doc_->undoStack()->setUndoLimit(undo->value());
     leftLocked_ = ll->isChecked();
@@ -219,6 +282,16 @@ void MainWindow::buildCentral() {
     soundBtn_->setChecked(true);
     loopBox_ = addBtn("loop", "반복 재생 / 한 번만 재생", [](bool) {}, true);
     loopBox_->setChecked(true);
+    pingBtn_ = addBtn("loop", "왕복 재생 (끝에서 거꾸로 되돌아옴)", [](bool) {}, true);
+    pingBtn_->setText(QStringLiteral("↔"));
+    speedBox_ = new QComboBox;
+    for (double s : {0.25, 0.5, 1.0, 1.5, 2.0, 4.0}) speedBox_->addItem(QString("×%1").arg(s), s);
+    speedBox_->setCurrentIndex(2);
+    speedBox_->setToolTip(QStringLiteral("재생 속도 (프로젝트 프레임 속도에 곱해집니다)"));
+    connect(speedBox_, &QComboBox::currentIndexChanged, this, [this] {
+        playTimer_.setInterval(std::max(1, int(1000 / (doc_->fps() * speedBox_->currentData().toDouble()))));
+    });
+    ph->addWidget(speedBox_);
     camViewBtn_ = addBtn("camera", "카메라 보기로 재생", [this](bool on) {
         canvas_->setCameraView(on);
         if (camViewAct_ && camViewAct_->isChecked() != on) camViewAct_->setChecked(on);
@@ -264,9 +337,19 @@ void MainWindow::buildCentral() {
     addBtn("prev", "이전 프레임 (←)", [this] { gotoFrame(doc_->currentFrame() - 1); });
     addBtn("next", "다음 프레임 (→). Shift+→ 는 항상 새 이미지를 만들며 이동", [this] { nextFrameAction(false); });
     autoNewBtn_ = addBtn("new", "자동 새 이미지: 켜면 다음 프레임으로 넘어갈 때(→) 현재 레이어에 빈 새 이미지를 만들고, 마지막 프레임이면 프레임을 늘립니다", [](bool) {}, true);
+    {
+        auto* addF = new QToolButton;
+        addF->setText(QStringLiteral("+프레임"));
+        addF->setToolTip(QStringLiteral("현재 프레임 뒤에 빈 프레임 추가 (Ctrl+Ins)"));
+        connect(addF, &QToolButton::clicked, this, [this] {
+            doc_->insertFrame(doc_->currentFrame() + 1);
+            gotoFrame(doc_->currentFrame() + 1);
+        });
+        ph->addWidget(addF);
+    }
     ph->addStretch();
     addBtn("center", "재생 헤드를 타임라인 중앙으로", [this] {
-        const int x = TimelineWidget::kNameW + doc_->currentFrame() * TimelineWidget::kCell;
+        const int x = TimelineWidget::kNameW + doc_->currentFrame() * timeline_->cell();
         tlScroll_->horizontalScrollBar()->setValue(x - tlScroll_->viewport()->width() / 2);
     });
     zoomLabel_ = new QLabel(QStringLiteral("100%"));
@@ -483,10 +566,11 @@ void MainWindow::buildDocks() {
     dockLight_ = makeDock("라이트 테이블", lt, Qt::RightDockWidgetArea);
     auto* remote = new RemotePanel;
     dockRemote_ = makeDock("리모컨", remote, Qt::RightDockWidgetArea);
+    dockFlip_ = makeDock("플립 패널", new FlipPanel(doc_), Qt::RightDockWidgetArea);
     auto* share = new ShareManagerPanel;
     dockShare_ = makeDock("공유 관리자", share, Qt::RightDockWidgetArea);
-    for (QDockWidget* d : {dockNavigator_, dockGuides_, dockLight_, dockRemote_, dockShare_}) tabifyDockWidget(dockScript_, d);
-    for (QDockWidget* d : {dockNavigator_, dockGuides_, dockLight_, dockRemote_, dockShare_}) d->hide();
+    for (QDockWidget* d : {dockNavigator_, dockGuides_, dockLight_, dockRemote_, dockShare_, dockFlip_}) tabifyDockWidget(dockScript_, d);
+    for (QDockWidget* d : {dockNavigator_, dockGuides_, dockLight_, dockRemote_, dockShare_, dockFlip_}) d->hide();
     connect(lt, &LightTablePanel::enabledChanged, this, [this](bool on) {
         if (lightAct_ && lightAct_->isChecked() != on) lightAct_->setChecked(on);
     });
@@ -629,6 +713,272 @@ void MainWindow::applyHistory(const HistEntry& e) {
     canvas_->setBrush(e.params);
     canvas_->setTool(e.tool);
     color_->setColorA(e.color);
+}
+
+void MainWindow::renderCameraDialog() {
+    QDialog dlg(this);
+    dlg.setWindowTitle("렌더 카메라");
+    auto* f = new QFormLayout(&dlg);
+    f->addRow(new QLabel("그림을 그리는 캔버스 크기와 별개로, 내보내기·퍼블리시·인쇄의 최종 출력 크기를 정합니다."));
+    const RenderCamera rc = doc_->renderCamera();
+    auto* on = new QCheckBox("렌더 카메라 사용");
+    on->setChecked(rc.on);
+    auto* w = new QSpinBox; w->setRange(16, 16384); w->setValue(rc.size.width());
+    auto* h = new QSpinBox; h->setRange(16, 16384); h->setValue(rc.size.height());
+    auto* preset = new QComboBox;
+    preset->addItem("직접 입력", QSize());
+    preset->addItem("HD 1280 x 720", QSize(1280, 720));
+    preset->addItem("풀 HD 1920 x 1080", QSize(1920, 1080));
+    preset->addItem("2K DCI 2048 x 1080", QSize(2048, 1080));
+    preset->addItem("UHD 4K 3840 x 2160", QSize(3840, 2160));
+    preset->addItem("정사각형 1080 x 1080", QSize(1080, 1080));
+    preset->addItem("세로 영상 1080 x 1920", QSize(1080, 1920));
+    preset->addItem("SD 720 x 480", QSize(720, 480));
+    connect(preset, &QComboBox::currentIndexChanged, &dlg, [=](int i) {
+        const QSize s = preset->itemData(i).toSize();
+        if (s.isValid()) { w->setValue(s.width()); h->setValue(s.height()); }
+    });
+    auto* fit = new QComboBox;
+    fit->addItems({"비율 유지 (남는 곳은 배경색)", "화면 채우기 (넘치는 곳은 잘림)", "늘이기 (비율 무시)"});
+    fit->setCurrentIndex(rc.fit);
+    f->addRow(on);
+    f->addRow("크기 프리셋", preset);
+    f->addRow("가로 (px)", w);
+    f->addRow("세로 (px)", h);
+    f->addRow("맞춤 방식", fit);
+    f->addRow(new QLabel(QString("현재 캔버스: %1 x %2").arg(doc_->size().width()).arg(doc_->size().height())));
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    f->addRow(bb);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    if (dlg.exec() != QDialog::Accepted) return;
+    RenderCamera n;
+    n.on = on->isChecked();
+    n.size = QSize(w->value(), h->value());
+    n.fit = fit->currentIndex();
+    doc_->setRenderCamera(n);
+    statusBar()->showMessage(n.on ? QString("렌더 카메라: %1 x %2 로 출력합니다.").arg(n.size.width()).arg(n.size.height()) : QStringLiteral("렌더 카메라를 껐습니다 (캔버스 크기로 출력)."), 4000);
+}
+
+void MainWindow::printDialog() {
+    QDialog dlg(this);
+    dlg.setWindowTitle("인쇄");
+    auto* f = new QFormLayout(&dlg);
+    auto* layout = new QComboBox;
+    layout->addItem("프레임당 한 장", QSize(1, 1));
+    layout->addItem("콘택트 시트 2 x 2", QSize(2, 2));
+    layout->addItem("콘택트 시트 3 x 4 (스토리보드)", QSize(3, 4));
+    layout->addItem("콘택트 시트 4 x 6", QSize(4, 6));
+    layout->setCurrentIndex(2);
+    auto* range = new QComboBox;
+    range->addItems({"전체 프레임", "현재 프레임만", "현재 프레임부터 끝까지"});
+    auto* numbers = new QCheckBox("프레임 번호 표시");
+    numbers->setChecked(true);
+    auto* cam = new QCheckBox("카메라 시점으로 인쇄");
+    cam->setEnabled(doc_->cameraEnabled());
+    auto* title = new QLineEdit(doc_->path().isEmpty() ? QStringLiteral("ONY") : QFileInfo(doc_->path()).completeBaseName());
+    auto* dest = new QComboBox;
+#ifdef ONY_HAS_PRINT
+    dest->addItem("프린터로 인쇄", 0);
+#endif
+    dest->addItem("PDF 파일로 저장", 1);
+    f->addRow("배치", layout);
+    f->addRow("범위", range);
+    f->addRow("제목", title);
+    f->addRow(numbers);
+    f->addRow(cam);
+    f->addRow("출력", dest);
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    f->addRow(bb);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    if (dlg.exec() != QDialog::Accepted) return;
+    PrintOptions o;
+    const QSize g = layout->currentData().toSize();
+    o.cols = g.width();
+    o.rows = g.height();
+    o.numbers = numbers->isChecked();
+    o.useCamera = cam->isChecked() && doc_->cameraEnabled();
+    o.title = title->text();
+    if (range->currentIndex() == 1) o.from = o.to = doc_->currentFrame();
+    else if (range->currentIndex() == 2) o.from = doc_->currentFrame();
+    if (dest->currentData().toInt() == 1) {
+        const QString path = QFileDialog::getSaveFileName(this, "PDF로 저장", o.title + ".pdf", "PDF (*.pdf)");
+        if (path.isEmpty()) return;
+        statusBar()->showMessage(Printing::exportPdf(doc_, path, o) ? "PDF로 저장했습니다: " + QDir::toNativeSeparators(path) : QStringLiteral("PDF를 저장하지 못했습니다."), 6000);
+        return;
+    }
+#ifdef ONY_HAS_PRINT
+    QPrinter printer(QPrinter::HighResolution);
+    QPrintDialog pd(&printer, this);
+    pd.setWindowTitle("인쇄");
+    if (pd.exec() != QDialog::Accepted) return;
+    statusBar()->showMessage(Printing::paintAll(&printer, doc_, o) ? QStringLiteral("인쇄했습니다.") : QStringLiteral("인쇄하지 못했습니다."), 5000);
+#endif
+}
+
+QStringList MainWindow::publishTo(const QString& folder, const QString& name, const PublishOptions& po) {
+    QStringList made, errs;
+    QDir().mkpath(folder);
+    VideoOptions vo;
+    vo.quality = po.quality;
+    vo.useCamera = doc_->cameraEnabled();
+    vo.audio = true;
+    if (po.mp4) {
+        vo.format = "mp4";
+        const QString out = QDir(folder).filePath(name + ".mp4");
+        const QString e = VideoExport::run(doc_, out, vo, po.progress);
+        if (e.isEmpty()) made << out; else errs << "MP4: " + e;
+    }
+    if (po.gif) {
+        vo.format = "gif";
+        const QString out = QDir(folder).filePath(name + ".gif");
+        const QString e = VideoExport::run(doc_, out, vo, po.progress);
+        if (e.isEmpty()) made << out; else errs << "GIF: " + e;
+    }
+    if (po.png) {
+        vo.format = "png";
+        vo.baseName = name;
+        const QString out = QDir(folder).filePath(name + "_png");
+        const QString e = VideoExport::run(doc_, out, vo, po.progress);
+        if (e.isEmpty()) made << out; else errs << "PNG: " + e;
+    }
+    if (po.pdf) {
+        PrintOptions o;
+        o.title = name;
+        o.cols = 3; o.rows = 4;
+        const QString out = QDir(folder).filePath(name + "_콘택트시트.pdf");
+        if (Printing::exportPdf(doc_, out, o)) made << out; else errs << "PDF: 저장 실패";
+    }
+    if (po.project) {
+        const QString out = QDir(folder).filePath(name + ".ony");
+        if (doc_->saveCopy(out)) made << out; else errs << "프로젝트: 저장 실패";
+    }
+    if (po.thumb) {
+        const QString out = QDir(folder).filePath(name + "_썸네일.png");
+        if (doc_->renderFrame(0, Qt::white, doc_->cameraEnabled()).save(out, "PNG")) made << out; else errs << "썸네일: 저장 실패";
+    }
+    QFile info(QDir(folder).filePath("퍼블리시_정보.txt"));
+    if (info.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QTextStream ts(&info);
+        ts.setEncoding(QStringConverter::Utf8);
+        ts << "ONY 퍼블리시\n" << "이름: " << name << "\n" << "날짜: " << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm") << "\n"
+           << "프레임: " << doc_->frameCount() << " (" << doc_->fps() << " fps)\n"
+           << "출력 크기: " << doc_->renderSize().width() << " x " << doc_->renderSize().height() << "\n"
+           << "만든 파일:\n";
+        for (const QString& s : made) ts << "  " << QFileInfo(s).fileName() << "\n";
+        for (const QString& s : errs) ts << "  (실패) " << s << "\n";
+        made << info.fileName();
+    }
+    lastPublishErrors_ = errs;
+    return made;
+}
+
+void MainWindow::publishDialog() {
+    if (playTimer_.isActive()) togglePlay();
+    QDialog dlg(this);
+    dlg.setWindowTitle("퍼블리시");
+    auto* f = new QFormLayout(&dlg);
+    f->addRow(new QLabel("선택한 형식을 한 번에 만들어 폴더 하나에 모읍니다."));
+    auto* name = new QLineEdit(doc_->path().isEmpty() ? QStringLiteral("ONY") : QFileInfo(doc_->path()).completeBaseName());
+    auto* mp4 = new QCheckBox("MP4 동영상"); mp4->setChecked(true);
+    auto* gif = new QCheckBox("GIF 애니메이션");
+    auto* png = new QCheckBox("PNG 이미지 시퀀스");
+    auto* pdf = new QCheckBox("콘택트 시트 PDF (스토리보드)"); pdf->setChecked(true);
+    auto* prj = new QCheckBox("프로젝트 사본 (.ony)"); prj->setChecked(true);
+    auto* thumb = new QCheckBox("썸네일 (첫 프레임 PNG)"); thumb->setChecked(true);
+    auto* quality = new QComboBox;
+    quality->addItems({"높음", "보통", "낮음 (작은 파일)"});
+    quality->setCurrentIndex(1);
+    f->addRow("이름", name);
+    for (auto* c : {mp4, gif, png, pdf, prj, thumb}) f->addRow(c);
+    f->addRow("영상 화질", quality);
+    f->addRow(new QLabel(QString("출력 크기: %1 x %2 (프로젝트 → 렌더 카메라 설정에서 바꿀 수 있습니다)").arg(doc_->renderSize().width()).arg(doc_->renderSize().height())));
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    f->addRow(bb);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    if (dlg.exec() != QDialog::Accepted) return;
+    const QString parent = QFileDialog::getExistingDirectory(this, "퍼블리시할 위치 선택");
+    if (parent.isEmpty()) return;
+    const QString nm = name->text().trimmed().isEmpty() ? QStringLiteral("ONY") : name->text().trimmed();
+    PublishOptions po;
+    po.mp4 = mp4->isChecked(); po.gif = gif->isChecked(); po.png = png->isChecked();
+    po.pdf = pdf->isChecked(); po.project = prj->isChecked(); po.thumb = thumb->isChecked();
+    po.quality = quality->currentIndex();
+    QProgressDialog prog("퍼블리시하는 중...", "취소", 0, 100, this);
+    prog.setWindowModality(Qt::WindowModal);
+    prog.setMinimumDuration(0);
+    po.progress = [&](int done, int total) {
+        prog.setValue(total > 0 ? done * 100 / total : 0);
+        QApplication::processEvents();
+        return !prog.wasCanceled();
+    };
+    const QString folder = QDir(parent).filePath(nm + "_publish");
+    const QStringList made = publishTo(folder, nm, po);
+    prog.close();
+    if (!lastPublishErrors_.isEmpty())
+        QMessageBox::warning(this, "퍼블리시", "일부 형식을 만들지 못했습니다:\n" + lastPublishErrors_.join("\n"));
+    statusBar()->showMessage(QString("퍼블리시 완료: %1 (%2개 파일)").arg(QDir::toNativeSeparators(folder)).arg(made.size()), 10000);
+}
+
+void MainWindow::strokeAnimationDialog() {
+    const int src = doc_->currentFrame();
+    if (doc_->strokeCount(src) == 0) {
+        QMessageBox::information(this, "획 애니메이션", "현재 프레임에 기록된 획이 없습니다.\n이미지 → 드로잉 레코더 → \"녹화 켜기\"(F9)를 켜고 그린 뒤 다시 실행하세요.");
+        return;
+    }
+    QDialog dlg(this);
+    dlg.setWindowTitle("획 애니메이션");
+    auto* f = new QFormLayout(&dlg);
+    f->addRow(new QLabel(QString("현재 프레임에 기록된 획 %1개를 그려지는 과정 그대로 새 레이어의 프레임들로 풀어 씁니다.").arg(doc_->strokeCount(src))));
+    auto* start = new QSpinBox; start->setRange(1, 100000); start->setValue(src + 1);
+    auto* len = new QSpinBox; len->setRange(2, 2000); len->setValue(std::min(48, std::max(2, doc_->fps() * 2)));
+    auto* mode = new QComboBox;
+    mode->addItems({"그린 속도 그대로", "획 길이에 비례 (일정한 속도)"});
+    f->addRow("시작 프레임", start);
+    f->addRow("길이 (프레임)", len);
+    f->addRow("진행 방식", mode);
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    f->addRow(bb);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    if (dlg.exec() != QDialog::Accepted) return;
+    const int l = doc_->strokesToFrames(src, start->value() - 1, len->value(), mode->currentIndex() == 0);
+    statusBar()->showMessage(l >= 0 ? QStringLiteral("획 애니메이션 레이어를 만들었습니다.") : QStringLiteral("만들지 못했습니다."), 3000);
+}
+
+void MainWindow::transitionDialog(int kind, const QString& name) {
+    const int l = doc_->currentLayer(), f0 = doc_->currentFrame();
+    bool ok = false;
+    const int n = QInputDialog::getInt(this, name, "전환 길이 (프레임 수)", 8, 2, std::max(2, doc_->frameCount() - 1 - f0), 1, &ok);
+    if (!ok) return;
+    runTransition(l, f0, n, kind);
+}
+
+bool MainWindow::runTransition(int l, int f0, int n, int kind) {
+    const int f1 = f0 + n;
+    if (f1 >= doc_->frameCount() || doc_->layer(l).locked) {
+        statusBar()->showMessage(QStringLiteral("전환할 프레임 범위가 부족하거나 레이어가 잠겨 있습니다."), 3000);
+        return false;
+    }
+    const int ka = doc_->resolveKey(l, f0), kb = doc_->resolveKey(l, f1);
+    if (ka < 0 || kb < 0) {
+        statusBar()->showMessage(QStringLiteral("시작·끝 프레임에 이미지가 있어야 합니다."), 3000);
+        return false;
+    }
+    const QImage a = doc_->keyImage(l, ka), b = doc_->keyImage(l, kb);
+    doc_->undoStack()->beginMacro(QStringLiteral("전환"));
+    for (int i = 1; i < n; ++i) {
+        const double t = double(i) / n;
+        QImage r;
+        if (kind == 0) r = Effects::crossfade(a, b, t);
+        else if (kind >= 1 && kind <= 4) r = Effects::wipe(a, b, t, kind - 1);
+        else r = Effects::slide(a, b, t);
+        doc_->pushKeyEdit(l, f0 + i, doc_->layer(l).frames[f0 + i], r, QStringLiteral("전환"));
+    }
+    doc_->undoStack()->endMacro();
+    return true;
 }
 
 void MainWindow::applyEffect(const QString& text, const std::function<QImage(const QImage&)>& fn) {
@@ -785,14 +1135,61 @@ void MainWindow::buildMenus() {
     QMenu* file = menuBar()->addMenu("파일");
     act(file, "새 프로젝트...", [this] { newProjectDialog(); }, QKeySequence::New);
     act(file, "프로젝트 열기...", [this] { openProject(); }, QKeySequence::Open);
+    QMenu* recentProj = file->addMenu("최근 프로젝트");
+    QMenu* recentDirs = file->addMenu("최근 폴더");
+    connect(recentProj, &QMenu::aboutToShow, this, [this, recentProj] {
+        recentProj->clear();
+        const QStringList l = QSettings("Ony", "Ony").value("recent/files").toStringList();
+        for (const QString& p : l) {
+            if (!QFileInfo::exists(p)) continue;
+            recentProj->addAction(QFileInfo(p).fileName() + "    " + QDir::toNativeSeparators(QFileInfo(p).absolutePath()), this, [this, p] {
+                if (maybeSave()) openPath(p);
+            });
+        }
+        if (recentProj->isEmpty()) recentProj->addAction("(없음)")->setEnabled(false);
+    });
+    connect(recentDirs, &QMenu::aboutToShow, this, [this, recentDirs] {
+        recentDirs->clear();
+        QStringList dirs;
+        for (const QString& p : QSettings("Ony", "Ony").value("recent/files").toStringList())
+            if (!dirs.contains(QFileInfo(p).absolutePath())) dirs << QFileInfo(p).absolutePath();
+        for (const QString& d : dirs)
+            recentDirs->addAction(QDir::toNativeSeparators(d), this, [d] { QDesktopServices::openUrl(QUrl::fromLocalFile(d)); });
+        if (recentDirs->isEmpty()) recentDirs->addAction("(없음)")->setEnabled(false);
+    });
     file->addSeparator();
     act(file, "저장", [this] { saveProject(); }, QKeySequence::Save);
     act(file, "다른 이름으로 저장...", [this] { saveProjectAs(); }, QKeySequence::SaveAs);
+    act(file, "템플릿으로 저장...", [this] {
+        bool ok = false;
+        const QString n = QInputDialog::getText(this, "템플릿으로 저장", "템플릿 이름:", QLineEdit::Normal, "내 템플릿", &ok);
+        if (!ok || n.trimmed().isEmpty()) return;
+        if (doc_->save(templateDir() + "/" + n.trimmed() + ".ony")) statusBar()->showMessage("템플릿을 저장했습니다: " + n, 3000);
+    });
+    QMenu* tplMenu = file->addMenu("템플릿으로 새 프로젝트");
+    connect(tplMenu, &QMenu::aboutToShow, this, [this, tplMenu] {
+        tplMenu->clear();
+        const auto l = QDir(templateDir()).entryInfoList({"*.ony"}, QDir::Files, QDir::Name);
+        for (const QFileInfo& fi : l)
+            tplMenu->addAction(fi.completeBaseName(), this, [this, fi] {
+                if (!maybeSave()) return;
+                if (!doc_->load(fi.absoluteFilePath())) return;
+                doc_->clearPath();
+                doc_->setModified(true);
+                syncAudio();
+                canvas_->zoomFit();
+                updateTitle();
+            });
+        if (tplMenu->isEmpty()) tplMenu->addAction("(저장된 템플릿 없음)")->setEnabled(false);
+    });
+    act(file, "백업 폴더 열기", [this] { QDesktopServices::openUrl(QUrl::fromLocalFile(backupDir())); });
     file->addSeparator();
     act(file, "현재 프레임 PNG로 내보내기...", [this] { exportCurrentPng(); });
-    act(file, "동영상으로 내보내기...", [this] { exportVideoDialog(); }, QKeySequence("Ctrl+Shift+E"));
+    act(file, "내보내기 (동영상 / 이미지 시퀀스)...", [this] { exportVideoDialog(); }, QKeySequence("Ctrl+Shift+E"));
     act(file, "PNG 시퀀스로 내보내기...", [this] { exportPngSequence(); });
     act(file, "타임시트 PDF로 내보내기...", [this] { exportTimesheetPdf(); });
+    act(file, "인쇄...", [this] { printDialog(); }, QKeySequence("Ctrl+P"));
+    act(file, "퍼블리시 (한 번에 여러 형식으로 내보내기)...", [this] { publishDialog(); });
     act(file, "타임시트 XDTS로 내보내기...", [this] { exportXdtsDialog(); });
     act(file, "스캔 이미지 가져오기...", [this] { scanImportDialog(); });
     act(file, "이미지 시퀀스 가져오기...", [this] { importSequenceDialog(); });
@@ -817,22 +1214,37 @@ void MainWindow::buildMenus() {
     edit->addAction(undo);
     edit->addAction(redo);
     edit->addSeparator();
-    act(edit, "잘라내기", [this] {
+    QAction* editCut = act(edit, "잘라내기", [this] {
         const int k = doc_->keyIndexAt(doc_->currentLayer(), doc_->currentFrame());
         if (k < 0) return;
         clip_ = doc_->keyImage(doc_->currentLayer(), k);
         canvas_->clearCurrent();
     }, QKeySequence::Cut);
-    act(edit, "복사", [this] {
+    QAction* editCopy = act(edit, "복사", [this] {
         const int k = doc_->keyIndexAt(doc_->currentLayer(), doc_->currentFrame());
         if (k >= 0) clip_ = doc_->keyImage(doc_->currentLayer(), k);
     }, QKeySequence::Copy);
-    act(edit, "붙여넣기", [this] {
+    QAction* editPaste = act(edit, "붙여넣기", [this] {
         if (clip_.isNull() || clip_.size() != doc_->size()) return;
         const int l = doc_->currentLayer(), f = doc_->currentFrame();
         if (doc_->layer(l).locked) return;
         doc_->pushKeyEdit(l, f, doc_->layer(l).frames[f], clip_, QStringLiteral("붙여넣기"));
     }, QKeySequence::Paste);
+    edit->addSeparator();
+    auto bookmarkStep = [this](int dir) {
+        const auto& bm = doc_->bookmarks();
+        int best = -1;
+        for (int f : bm) {
+            if (dir > 0 && f > doc_->currentFrame() && (best < 0 || f < best)) best = f;
+            if (dir < 0 && f < doc_->currentFrame() && f > best) best = f;
+        }
+        if (best >= 0) gotoFrame(best);
+    };
+    act(edit, "북마크 켜기/끄기", [this] { doc_->toggleBookmark(doc_->currentFrame()); }, QKeySequence("Ctrl+Shift+Up"));
+    act(edit, "이전 북마크로 이동", [bookmarkStep] { bookmarkStep(-1); }, QKeySequence("Ctrl+Shift+Left"));
+    act(edit, "다음 북마크로 이동", [bookmarkStep] { bookmarkStep(1); }, QKeySequence("Ctrl+Shift+Right"));
+    act(edit, "북마크 모두 지우기", [this] { doc_->clearBookmarks(); });
+    edit->addSeparator();
     act(edit, "단축키 설정...", [this] { showShortcutDialog(this); }, QKeySequence("Ctrl+Alt+K"));
     edit->addSeparator();
     act(edit, "모두 선택", [this] { canvas_->selectAll(); }, QKeySequence::SelectAll);
@@ -841,6 +1253,32 @@ void MainWindow::buildMenus() {
 
     // 프로젝트
     QMenu* proj = menuBar()->addMenu("프로젝트");
+    act(proj, "렌더 카메라 설정...", [this] { renderCameraDialog(); });
+    proj->addSeparator();
+    act(proj, "프로젝트 복제...", [this] {
+        const QString path = QFileDialog::getSaveFileName(this, "프로젝트 복제", QString(), "ONY 프로젝트 (*.ony)");
+        if (path.isEmpty()) return;
+        if (doc_->saveCopy(path)) statusBar()->showMessage("복제본을 저장했습니다 (현재 프로젝트는 그대로)", 3000);
+        else QMessageBox::warning(this, "복제 실패", "파일을 저장할 수 없습니다.");
+        updateTitle();
+    });
+    QMenu* go = proj->addMenu("이동");
+    go->addAction("첫 프레임", this, [this] { gotoFrame(0); });
+    go->addAction("마지막 프레임", this, [this] { gotoFrame(doc_->frameCount() - 1); });
+    go->addAction("프레임 번호로 이동", this, [this] {
+        bool ok = false;
+        const int f = QInputDialog::getInt(this, "프레임 이동", "프레임 번호:", doc_->currentFrame() + 1, 1, doc_->frameCount(), 1, &ok);
+        if (ok) gotoFrame(f - 1);
+    });
+    go->addAction("다음 키 이미지", this, [this] {
+        const int n = doc_->nextKeyIndex(doc_->currentLayer(), doc_->currentFrame());
+        if (n >= 0) gotoFrame(n);
+    });
+    go->addAction("이전 키 이미지", this, [this] {
+        const int l = doc_->currentLayer();
+        for (int f = doc_->currentFrame() - 1; f >= 0; --f)
+            if (!doc_->layer(l).frames[f].isNull() && f < doc_->keyIndexAt(l, doc_->currentFrame())) { gotoFrame(f); return; }
+    });
     act(proj, "프로젝트 설정...", [this] { projectSettingsDialog(); }, QKeySequence("Ctrl+Alt+P"));
     proj->addSeparator();
     act(proj, "프로젝트 정보", [this] {
@@ -926,6 +1364,114 @@ void MainWindow::buildMenus() {
     });
     act(image, "이미지 지우기", [this] { canvas_->clearCurrent(); });
     image->addSeparator();
+    act(image, "모든 이미지 선택", [this] { timeline_->setRange(0, doc_->frameCount() - 1); });
+    act(image, "이미지 반복...", [this] {
+        // 선택 구간(없으면 현재 이미지부터 다음 키 전까지)을 N번 반복한다
+        const int l = doc_->currentLayer();
+        int a = doc_->currentFrame(), b = a;
+        if (timeline_->rangeStart() >= 0) { a = timeline_->rangeStart(); b = timeline_->rangeEnd(); }
+        else {
+            const int k = doc_->keyIndexAt(l, a);
+            if (k < 0) return;
+            a = k;
+            const int n = doc_->nextKeyIndex(l, k);
+            b = n < 0 ? doc_->frameCount() - 1 : n - 1;
+        }
+        QDialog dlg(this);
+        dlg.setWindowTitle("이미지 반복");
+        auto* f = new QFormLayout(&dlg);
+        f->addRow(new QLabel(QString("대상 구간: %1 ~ %2 프레임 (레이어 \"%3\")").arg(a + 1).arg(b + 1).arg(doc_->layer(l).name)));
+        auto* times = new QSpinBox;
+        times->setRange(1, 200);
+        times->setValue(2);
+        auto* pp = new QCheckBox("왕복 (홀수 번째 반복은 거꾸로)");
+        f->addRow("반복 횟수", times);
+        f->addRow(pp);
+        auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+        connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+        f->addRow(bb);
+        if (dlg.exec() != QDialog::Accepted) return;
+        const int added = doc_->repeatKeys(l, a, b, times->value(), pp->isChecked());
+        statusBar()->showMessage(QString("%1 프레임을 반복해 붙였습니다.").arg(added), 4000);
+    });
+    act(image, "이미지 순서 뒤집기", [this] {
+        // 선택한 구간이 있으면 그 구간만, 없으면 레이어 전체의 이미지 순서를 뒤집는다
+        const int a = timeline_->rangeStart() >= 0 ? timeline_->rangeStart() : 0;
+        const int b = timeline_->rangeStart() >= 0 ? timeline_->rangeEnd() : doc_->frameCount() - 1;
+        doc_->reverseKeys(doc_->currentLayer(), a, b);
+    });
+    image->addSeparator();
+    image->addAction(editCut);
+    image->addAction(editCopy);
+    image->addAction(editPaste);
+    image->addSeparator();
+    QMenu* inst = image->addMenu("인스턴스");
+    inst->addAction("인스턴스 이름 변경", this, [this] {
+        const int l = doc_->currentLayer(), k = doc_->keyIndexAt(l, doc_->currentFrame());
+        if (k < 0) return;
+        bool ok = false;
+        const QString n = QInputDialog::getText(this, "인스턴스 이름", "이름:", QLineEdit::Normal, doc_->layer(l).instanceNames.value(k), &ok);
+        if (!ok) return;
+        if (n.isEmpty()) doc_->layer(l).instanceNames.remove(k);
+        else doc_->layer(l).instanceNames[k] = n;
+        doc_->notifyChanged();
+    });
+    inst->addAction("인스턴스 이름 지우기", this, [this] {
+        const int l = doc_->currentLayer(), k = doc_->keyIndexAt(l, doc_->currentFrame());
+        if (k < 0) return;
+        doc_->layer(l).instanceNames.remove(k);
+        doc_->notifyChanged();
+    });
+    inst->addAction("같은 이름의 이미지로 이동", this, [this] {
+        const int l = doc_->currentLayer(), k = doc_->keyIndexAt(l, doc_->currentFrame());
+        const QString n = doc_->layer(l).instanceNames.value(k);
+        if (n.isEmpty()) return;
+        for (int f = k + 1; f < doc_->frameCount(); ++f)
+            if (doc_->layer(l).instanceNames.value(f) == n) { gotoFrame(f); return; }
+        for (int f = 0; f < k; ++f)
+            if (doc_->layer(l).instanceNames.value(f) == n) { gotoFrame(f); return; }
+    });
+    QMenu* expo = image->addMenu("노출");
+    expo->addAction("노출 늘리기", this, [this] {
+        if (doc_->extendExposure(doc_->currentLayer(), doc_->currentFrame())) gotoFrame(doc_->currentFrame() + 1);
+    });
+    expo->addAction("노출 줄이기", this, [this] { doc_->shrinkExposure(doc_->currentLayer(), doc_->currentFrame()); });
+    for (int n : {1, 2, 3, 4}) {
+        expo->addAction(QString("모든 이미지를 %1프레임씩").arg(n), this, [this, n] { doc_->setUniformExposure(doc_->currentLayer(), n); });
+    }
+    image->addSeparator();
+    auto scanFix = [this](int th, int ds) {
+        const int l = doc_->currentLayer(), k = doc_->keyIndexAt(l, doc_->currentFrame());
+        if (k < 0 || doc_->layer(l).locked) return;
+        const QImage src = doc_->keyImage(l, k);
+        doc_->pushKeyEdit(l, k, src, Extras::scanClean(src, th, ds, canvas_->colorA()), QStringLiteral("스캔 클리너"));
+    };
+    act(image, "스캔 클리너 (약하게)", [scanFix] { scanFix(200, 0); });
+    act(image, "스캔 클리너 (강하게)", [scanFix] { scanFix(150, 2); });
+
+    // 드로잉 레코더 / 획 애니메이션
+    image->addSeparator();
+    QMenu* rec = image->addMenu("드로잉 레코더");
+    QAction* recAct = act(rec, "녹화 켜기 (그리는 획을 기록)", [] {}, QKeySequence("F9"));
+    recAct->setCheckable(true);
+    connect(recAct, &QAction::toggled, this, [this](bool on) {
+        doc_->setRecording(on);
+        statusBar()->showMessage(on ? QStringLiteral("● 녹화 중: 이제 그리는 획이 기록됩니다") : QStringLiteral("녹화를 껐습니다"), 3000);
+    });
+    recAct_ = recAct;
+    QAction* recInfo = rec->addAction("기록된 획: 0개");
+    recInfo->setEnabled(false);
+    connect(doc_, &Document::recorderChanged, this, [this, recInfo] {
+        recInfo->setText(QString("기록된 획: 전체 %1개 / 현재 프레임 %2개").arg(doc_->strokeCount()).arg(doc_->strokeCount(doc_->currentFrame())));
+    });
+    connect(doc_, &Document::currentChanged, this, [this, recInfo] {
+        recInfo->setText(QString("기록된 획: 전체 %1개 / 현재 프레임 %2개").arg(doc_->strokeCount()).arg(doc_->strokeCount(doc_->currentFrame())));
+    });
+    act(rec, "획 애니메이션 만들기 (현재 프레임의 기록 → 새 레이어)...", [this] { strokeAnimationDialog(); });
+    act(rec, "현재 프레임의 기록 지우기", [this] { doc_->clearStrokes(doc_->currentFrame()); });
+    act(rec, "기록 모두 지우기", [this] { doc_->clearStrokes(); });
+    image->addSeparator();
     act(image, "변형", [this] { transformDialog(); }, QKeySequence("Ctrl+T"));
     act(image, "원근", [this] { perspectiveDialog(); });
     act(image, "메시 워프", [this] { meshWarpDialog(); });
@@ -946,6 +1492,28 @@ void MainWindow::buildMenus() {
     act(fx, "어둡게", [this] { applyEffect("어둡게", [](const QImage& i) { return Effects::brightness(i, -24); }); });
     act(fx, "블러(박스, 반경 4)", [this] { applyEffect("블러", [](const QImage& i) { return Effects::boxBlur(i, 4); }); });
     fx->addSeparator();
+    for (const QString& cat : Effects::categories()) {
+        QMenu* sub = fx->addMenu(cat);
+        for (Effects::Type t : Effects::typesIn(cat)) {
+            const auto pi = Effects::paramInfo(t);
+            act(sub, Effects::typeName(t) + (pi.has ? "..." : ""), [this, t, pi] {
+                Effects::Item item;
+                item.type = t;
+                item.param = pi.def;
+                if (pi.has) {
+                    bool ok = false;
+                    item.param = QInputDialog::getInt(this, Effects::typeName(t), pi.label, pi.def, pi.lo, pi.hi, 1, &ok);
+                    if (!ok) return;
+                }
+                applyEffect(Effects::typeName(t), [item](const QImage& i) { return Effects::apply(i, item); });
+            });
+        }
+    }
+    QMenu* trans = fx->addMenu("전환");
+    const QStringList tnames = {"디졸브", "와이프 (좌→우)", "와이프 (우→좌)", "와이프 (위→아래)", "와이프 (아래→위)", "밀기"};
+    for (int ti = 0; ti < tnames.size(); ++ti)
+        act(trans, tnames[ti] + "...", [this, ti, tnames] { transitionDialog(ti, tnames[ti]); });
+    fx->addSeparator();
     act(fx, "FX 스택 열기 (비파괴)", [this] {
         dockFx_->show();
         dockFx_->raise();
@@ -958,7 +1526,14 @@ void MainWindow::buildMenus() {
     act(view, "화면에 맞춤", [this] { canvas_->zoomFit(); }, QKeySequence("Ctrl+0"));
     act(view, "100%", [this] { canvas_->zoomActual(); }, QKeySequence("Ctrl+1"));
     view->addSeparator();
-    QAction* lt = act(view, "라이트 테이블", [] {}, QKeySequence("Shift+L"));
+    act(view, "타임라인 확대", [this] { timeline_->setCellWidth(timeline_->cell() + 6); }, QKeySequence("Ctrl+Alt+="));
+    act(view, "타임라인 축소", [this] { timeline_->setCellWidth(timeline_->cell() - 6); }, QKeySequence("Ctrl+Alt+-"));
+    act(view, "타임라인 기본 크기", [this] { timeline_->setCellWidth(TimelineWidget::kCell); }, QKeySequence("Ctrl+Alt+0"));
+    QAction* compactAct = act(view, "레이어 접기 (한 줄로 보기)", [] {}, QKeySequence("Ctrl+Alt+K"));
+    compactAct->setCheckable(true);
+    connect(compactAct, &QAction::toggled, this, [this](bool on) { timeline_->setCompact(on); });
+    view->addSeparator();
+    QAction* lt = act(view, "라이트 테이블", [] {}, QKeySequence("Ctrl+L"));
     lightAct_ = lt;
     lt->setCheckable(true);
     connect(lt, &QAction::toggled, canvas_, &CanvasWidget::setLightTable);
@@ -1066,6 +1641,7 @@ void MainWindow::buildMenus() {
     }
     addDockToggle(tb, dockLight_, "light", "라이트 테이블 패널");
     addDockToggle(tb, dockRemote_, "remote", "리모컨 패널");
+    addDockToggle(tb, dockFlip_, "play", "플립 패널");
     addDockToggle(tb, dockNavigator_, "navigator", "내비게이터 패널");
     addDockToggle(tb, dockFx_, "fx", "FX 스택");
     addDockToggle(tb, dockLibrary_, "library", "이미지 라이브러리");
@@ -1198,11 +1774,11 @@ void MainWindow::applyRoom(int index) {
 void MainWindow::applyRoomDefault(int index) {
     // 룸마다 오른쪽 서랍에 보이는 패널이 달라진다.
     const QList<QDockWidget*> right = {dockBrush_, dockLibrary_, dockTimesheet_, dockFx_, dockCamera_, dockStory_,
-                                       dockScript_, dockNavigator_, dockGuides_, dockLight_, dockRemote_, dockShare_};
+                                       dockScript_, dockNavigator_, dockGuides_, dockLight_, dockRemote_, dockShare_, dockFlip_};
     QList<QDockWidget*> show;
     switch (index) {
     case 0: show = {dockBrush_, dockNavigator_}; break;
-    case 1: show = {dockTimesheet_, dockLight_, dockCamera_, dockRemote_}; break;
+    case 1: show = {dockTimesheet_, dockLight_, dockCamera_, dockRemote_, dockFlip_}; break;
     case 2: show = {dockFx_, dockLibrary_, dockGuides_}; break;
     default: show = {dockStory_, dockShare_}; break;
     }
@@ -1275,6 +1851,8 @@ void MainWindow::projectSettingsDialog() {
     form->addRow(lockRatio);
     form->addRow("크기 변경 방식", mode);
     form->addRow("프레임 속도", fps);
+    auto* stretch = new QCheckBox("프레임 속도를 바꿀 때 길이(초) 유지: 이미지 위치를 비율대로 옮김");
+    form->addRow(stretch);
     form->addRow("프레임 수", frames);
     auto* note = new QLabel("해상도를 바꾸면 실행 취소 기록이 지워집니다.");
     note->setStyleSheet("color:#a0a0a0;");
@@ -1286,8 +1864,12 @@ void MainWindow::projectSettingsDialog() {
     if (dlg.exec() != QDialog::Accepted) return;
     const QSize ns(w->value(), h->value());
     if (ns != doc_->size()) doc_->resizeCanvas(ns, mode->currentIndex());
-    if (fps->value() != doc_->fps()) doc_->setFps(fps->value());
-    if (frames->value() != doc_->frameCount()) doc_->setFrameCount(frames->value());
+    const bool fpsChanged = fps->value() != doc_->fps();
+    if (fpsChanged) {
+        if (stretch->isChecked()) doc_->stretchToFps(fps->value());
+        else doc_->setFps(fps->value());
+    }
+    if (frames->value() != doc_->frameCount() && !(stretch->isChecked() && fpsChanged)) doc_->setFrameCount(frames->value());
     canvas_->zoomFit();
     updateInfo();
     statusBar()->showMessage(QString("프로젝트 설정 적용: %1 x %2, %3 fps, %4 프레임").arg(ns.width()).arg(ns.height()).arg(doc_->fps()).arg(doc_->frameCount()), 4000);
@@ -1351,6 +1933,10 @@ void MainWindow::openProject() {
     if (!maybeSave()) return;
     const QString path = QFileDialog::getOpenFileName(this, "프로젝트 열기", QString(), "ONY 프로젝트 (*.ony *.tvpx)");
     if (path.isEmpty()) return;
+    openPath(path);
+}
+
+void MainWindow::openPath(const QString& path) {
     if (playTimer_.isActive()) togglePlay();
     if (!doc_->load(path)) {
         QMessageBox::warning(this, "열기 실패", "프로젝트 파일을 읽을 수 없습니다.");
@@ -1359,13 +1945,65 @@ void MainWindow::openProject() {
     loadClipSiblings(path);
     syncAudio();
     canvas_->zoomFit();
+    addRecent(path);
+}
+
+void MainWindow::setupAutosave() {
+    if (!autosaveTimer_) {
+        autosaveTimer_ = new QTimer(this);
+        connect(autosaveTimer_, &QTimer::timeout, this, [this] {
+            if (!doc_->modified()) return;
+            const QString name = doc_->path().isEmpty() ? QStringLiteral("이름없음") : QFileInfo(doc_->path()).completeBaseName();
+            if (doc_->saveCopy(backupDir() + "/autosave_" + name + ".ony")) statusBar()->showMessage("자동 백업했습니다", 2500);
+        });
+    }
+    const int min = QSettings("Ony", "Ony").value("save/autosaveMin", 5).toInt();
+    autosaveTimer_->stop();
+    if (min > 0) autosaveTimer_->start(min * 60 * 1000);
+}
+
+void MainWindow::openLastProject() {
+    const QStringList l = QSettings("Ony", "Ony").value("recent/files").toStringList();
+    for (const QString& p : l)
+        if (QFileInfo::exists(p)) { openPath(p); return; }
+}
+
+QString MainWindow::backupDir() const {
+    const QString d = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/backup";
+    QDir().mkpath(d);
+    return d;
+}
+
+QString MainWindow::templateDir() const {
+    const QString d = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/templates";
+    QDir().mkpath(d);
+    return d;
+}
+
+void MainWindow::addRecent(const QString& path) {
+    QSettings st("Ony", "Ony");
+    QStringList l = st.value("recent/files").toStringList();
+    const QString abs = QFileInfo(path).absoluteFilePath();
+    l.removeAll(abs);
+    l.prepend(abs);
+    while (l.size() > 10) l.removeLast();
+    st.setValue("recent/files", l);
 }
 
 bool MainWindow::writeProject(const QString& path) {
     const int keep = clipIdx_;
     if (clipNames_.size() > 1 && clipIdx_ != 0) switchClip(0);
+    // 덮어쓰기 전에 이전 파일을 백업 폴더에 보관 (최근 10개)
+    if (QFileInfo::exists(path)) {
+        const QFileInfo fi(path);
+        QFile::copy(path, QString("%1/%2_%3.ony").arg(backupDir(), fi.completeBaseName(), QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss")));
+        QDir bd(backupDir());
+        const auto old = bd.entryInfoList({fi.completeBaseName() + "_*.ony"}, QDir::Files, QDir::Time);
+        for (int i = QSettings("Ony", "Ony").value("save/backupCount", 10).toInt(); i < old.size(); ++i) QFile::remove(old[i].absoluteFilePath());
+    }
     const bool ok = doc_->save(path);
     if (ok) {
+        addRecent(path);
         QString base = path;
         if (base.endsWith(".ony", Qt::CaseInsensitive)) base.chop(4);
         else if (base.endsWith(".tvpx", Qt::CaseInsensitive)) base.chop(5);
@@ -1444,64 +2082,143 @@ void MainWindow::exportCurrentPng() {
 void MainWindow::exportVideoDialog() {
     if (playTimer_.isActive()) togglePlay();
     QDialog dlg(this);
-    dlg.setWindowTitle("동영상으로 내보내기");
+    dlg.setWindowTitle("내보내기");
+    dlg.setMinimumWidth(420);
     auto* form = new QFormLayout(&dlg);
     auto* fmt = new QComboBox;
-    fmt->addItem("MP4 (H.264)", "mp4");
-    fmt->addItem("MOV (ProRes)", "mov");
-    fmt->addItem("WebM (VP9)", "webm");
-    fmt->addItem("GIF (애니메이션)", "gif");
+    fmt->addItem("MP4 동영상 (H.264)", "mp4");
+    fmt->addItem("MOV 동영상 (ProRes, 투명 배경 가능)", "mov");
+    fmt->addItem("WebM 동영상 (VP9, 투명 배경 가능)", "webm");
+    fmt->addItem("GIF 애니메이션", "gif");
+    fmt->addItem("PNG 이미지 시퀀스", "png");
+    fmt->addItem("JPG 이미지 시퀀스", "jpg");
+    fmt->addItem("BMP 이미지 시퀀스", "bmp");
+    fmt->addItem("TIFF 이미지 시퀀스", "tiff");
+    QSettings st("Ony", "Ony");
+    fmt->setCurrentIndex(std::max(0, fmt->findData(st.value("export/format", "mp4"))));
+
     auto* range = new QComboBox;
     range->addItem("전체 프레임");
     range->addItem("현재 프레임부터 끝까지");
     const bool hasLoop = loopA_ >= 0;
-    if (hasLoop) range->addItem(QString("반복 구간 (%1–%2)").arg(loopA_ + 1).arg(loopB_ + 1));
+    range->addItem(hasLoop ? QString("반복 구간 (%1–%2)").arg(loopA_ + 1).arg(loopB_ + 1) : QString("반복 구간 (지정 안 됨)"));
+    range->addItem("직접 지정");
+    auto* fromSp = new QSpinBox;
+    auto* toSp = new QSpinBox;
+    fromSp->setRange(1, doc_->frameCount());
+    toSp->setRange(1, doc_->frameCount());
+    fromSp->setValue(1);
+    toSp->setValue(doc_->frameCount());
+    auto* custom = new QWidget;
+    auto* ch = new QHBoxLayout(custom);
+    ch->setContentsMargins(0, 0, 0, 0);
+    ch->addWidget(fromSp);
+    ch->addWidget(new QLabel("~"));
+    ch->addWidget(toSp);
+    custom->setVisible(false);
+    connect(range, &QComboBox::currentIndexChanged, &dlg, [custom](int i) { custom->setVisible(i == 3); });
+
     auto* quality = new QComboBox;
     quality->addItems({"높음", "보통", "낮음 (작은 파일)"});
     quality->setCurrentIndex(1);
     auto* scale = new QComboBox;
-    scale->addItem("100%", 100);
-    scale->addItem("75%", 75);
-    scale->addItem("50%", 50);
-    scale->addItem("25%", 25);
+    for (int s : {200, 150, 100, 75, 50, 25}) scale->addItem(QString("%1%  (%2 x %3)").arg(s).arg(doc_->renderSize().width() * s / 100).arg(doc_->renderSize().height() * s / 100), s);
+    scale->setCurrentIndex(2);
+    auto* fps = new QComboBox;
+    fps->addItem(QString("프로젝트와 같게 (%1 fps)").arg(doc_->fps()), 0);
+    for (int f : {8, 12, 15, 24, 25, 30, 48, 60}) fps->addItem(QString("%1 fps").arg(f), f);
+    auto* bg = new QComboBox;
+    bg->addItem("흰색", "white");
+    bg->addItem("검정", "black");
+    bg->addItem("투명 (MOV / WebM / PNG / TIFF)", "none");
+    bg->addItem("색 지정...", "custom");
+    QColor customBg(0x20, 0x80, 0xff);
+    connect(bg, &QComboBox::activated, &dlg, [&](int i) {
+        if (bg->itemData(i).toString() != "custom") return;
+        const QColor c = QColorDialog::getColor(customBg, &dlg, "배경색");
+        if (c.isValid()) customBg = c;
+    });
+    auto* camera = new QCheckBox("카메라 시점으로 내보내기");
+    camera->setChecked(doc_->cameraEnabled());
+    camera->setEnabled(doc_->cameraEnabled());
     auto* audio = new QCheckBox("프로젝트의 소리 넣기");
     audio->setChecked(!doc_->audioPath().isEmpty());
     audio->setEnabled(!doc_->audioPath().isEmpty());
+
     form->addRow("형식", fmt);
     form->addRow("범위", range);
+    form->addRow("", custom);
     form->addRow("화질", quality);
     form->addRow("출력 크기", scale);
+    form->addRow("프레임 속도", fps);
+    form->addRow("배경", bg);
+    form->addRow(camera);
     form->addRow(audio);
     const QString ffmpeg = VideoExport::findFfmpeg();
-    auto* note = new QLabel(ffmpeg.isEmpty() ? "ffmpeg 를 찾지 못했습니다. ffmpeg.exe 를 ony.exe 옆에 두세요." : "인코더: " + QDir::toNativeSeparators(ffmpeg));
-    note->setStyleSheet("color:#a0a0a0;");
+    auto* note = new QLabel;
     note->setWordWrap(true);
+    note->setStyleSheet("color:#a0a0a0;");
     form->addRow(note);
+    // 형식에 따라 쓸 수 없는 옵션을 끈다
+    auto refresh = [&] {
+        const QString f = fmt->currentData().toString();
+        const bool video = f == "mp4" || f == "mov" || f == "webm" || f == "gif";
+        quality->setEnabled(f == "mp4" || f == "mov" || f == "webm");
+        fps->setEnabled(video);
+        audio->setEnabled(f != "gif" && video && !doc_->audioPath().isEmpty());
+        const bool alpha = f == "mov" || f == "webm" || f == "png" || f == "tiff";
+        const int noneIdx = bg->findData("none");
+        qobject_cast<QStandardItemModel*>(bg->model())->item(noneIdx)->setEnabled(alpha);
+        if (!alpha && bg->currentIndex() == noneIdx) bg->setCurrentIndex(0);
+        if (video) note->setText(ffmpeg.isEmpty() ? "ffmpeg 를 찾지 못했습니다. ffmpeg.exe 를 ony.exe 옆에 두세요." : "인코더: " + QDir::toNativeSeparators(ffmpeg));
+        else note->setText("선택한 구간의 프레임을 번호가 붙은 이미지 파일로 저장합니다.");
+    };
+    connect(fmt, &QComboBox::currentIndexChanged, &dlg, refresh);
+    refresh();
     auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     form->addRow(bb);
     if (dlg.exec() != QDialog::Accepted) return;
+    st.setValue("export/format", fmt->currentData());
 
     VideoOptions opt;
     opt.format = fmt->currentData().toString();
     opt.quality = quality->currentIndex();
     opt.scalePercent = scale->currentData().toInt();
     opt.audio = audio->isChecked();
+    opt.fps = fps->currentData().toInt();
+    opt.useCamera = camera->isChecked();
+    const QString bgKey = bg->currentData().toString();
+    opt.background = bgKey == "black" ? QColor(Qt::black) : bgKey == "none" ? QColor(0, 0, 0, 0) : bgKey == "custom" ? customBg : QColor(Qt::white);
     opt.from = 0;
     opt.to = doc_->frameCount() - 1;
-    if (range->currentIndex() == 1) opt.from = doc_->currentFrame();
-    else if (range->currentIndex() == 2) {
-        opt.from = loopA_;
-        opt.to = loopB_;
+    switch (range->currentIndex()) {
+    case 1: opt.from = doc_->currentFrame(); break;
+    case 2:
+        if (hasLoop) { opt.from = loopA_; opt.to = loopB_; }
+        break;
+    case 3:
+        opt.from = std::min(fromSp->value(), toSp->value()) - 1;
+        opt.to = std::max(fromSp->value(), toSp->value()) - 1;
+        break;
+    default: break;
     }
-    QString base = doc_->path().isEmpty() ? QStringLiteral("ony") : QFileInfo(doc_->path()).completeBaseName();
-    const QString ext = opt.format;
-    QString out = QFileDialog::getSaveFileName(this, "동영상 저장", base + "." + ext, QString("%1 (*.%1)").arg(ext));
-    if (out.isEmpty()) return;
-    if (!out.endsWith("." + ext, Qt::CaseInsensitive)) out += "." + ext;
+    const QString base = doc_->path().isEmpty() ? QStringLiteral("ony") : QFileInfo(doc_->path()).completeBaseName();
+    const bool seq = opt.format == "png" || opt.format == "jpg" || opt.format == "bmp" || opt.format == "tiff";
+    QString out;
+    if (seq) {
+        out = QFileDialog::getExistingDirectory(this, "이미지를 저장할 폴더");
+        if (out.isEmpty()) return;
+        opt.baseName = base;
+    } else {
+        const QString ext = opt.format;
+        out = QFileDialog::getSaveFileName(this, "동영상 저장", base + "." + ext, QString("%1 (*.%1)").arg(ext));
+        if (out.isEmpty()) return;
+        if (!out.endsWith("." + ext, Qt::CaseInsensitive)) out += "." + ext;
+    }
 
-    QProgressDialog prog("프레임을 렌더링하고 인코딩하는 중...", "취소", 0, 100, this);
+    QProgressDialog prog("프레임을 렌더링하고 저장하는 중...", "취소", 0, 100, this);
     prog.setWindowModality(Qt::WindowModal);
     prog.setMinimumDuration(0);
     const QString err = VideoExport::run(doc_, out, opt, [&](int done, int total) {
@@ -1511,9 +2228,9 @@ void MainWindow::exportVideoDialog() {
     });
     prog.close();
     if (err.isEmpty()) {
-        statusBar()->showMessage("동영상을 저장했습니다: " + QDir::toNativeSeparators(out), 8000);
+        statusBar()->showMessage("내보냈습니다: " + QDir::toNativeSeparators(out), 8000);
     } else if (err != "취소됨") {
-        QMessageBox::warning(this, "동영상 내보내기 실패", err);
+        QMessageBox::warning(this, "내보내기 실패", err);
     }
 }
 
@@ -1608,7 +2325,8 @@ void MainWindow::togglePlay() {
         emit doc_->changed();
         if (player_) player_->pause();
     } else {
-        playTimer_.setInterval(1000 / doc_->fps());
+        playTimer_.setInterval(std::max(1, int(1000 / (doc_->fps() * (speedBox_ ? speedBox_->currentData().toDouble() : 1.0)))));
+        playDir_ = 1;
         doc_->setProxyDivisor(proxyChoice_);
         if (loopModeBtn_->isChecked() && loopA_ >= 0 && (doc_->currentFrame() < loopA_ || doc_->currentFrame() > loopB_))
             doc_->setCurrentFrame(loopA_);
@@ -1621,9 +2339,17 @@ void MainWindow::togglePlay() {
 }
 
 void MainWindow::stepPlay() {
-    int next = doc_->currentFrame() + 1;
-    if (loopModeBtn_->isChecked() && loopA_ >= 0 && next > loopB_) next = loopA_;
-    else if (next >= doc_->frameCount()) {
+    const bool useLoop = loopModeBtn_->isChecked() && loopA_ >= 0;
+    const int lo = useLoop ? loopA_ : 0;
+    const int hi = useLoop ? loopB_ : doc_->frameCount() - 1;
+    int next = doc_->currentFrame() + playDir_;
+    if (pingBtn_ && pingBtn_->isChecked()) {
+        // 왕복: 끝에 닿으면 방향을 바꾼다
+        if (next > hi) { playDir_ = -1; next = std::max(lo, hi - 1); }
+        else if (next < lo) { playDir_ = 1; next = std::min(hi, lo + 1); }
+    } else if (useLoop && next > hi) {
+        next = lo;
+    } else if (next >= doc_->frameCount()) {
         if (loopBox_->isChecked()) {
             next = 0;
             if (player_ && !doc_->audioPath().isEmpty()) player_->setPosition(0);
@@ -1632,7 +2358,7 @@ void MainWindow::stepPlay() {
             return;
         }
     }
-    doc_->setCurrentFrame(next);
+    doc_->setCurrentFrame(std::clamp(next, 0, doc_->frameCount() - 1));
 }
 
 void MainWindow::updateTitle() {
@@ -1696,7 +2422,7 @@ bool MainWindow::eventFilter(QObject* o, QEvent* e) {
         } else if (e->type() == QEvent::MouseMove && scrubActive_) {
             auto* me = static_cast<QMouseEvent*>(e);
             const QPoint p = timeline_->mapFromGlobal(me->globalPosition().toPoint());
-            const int f = (p.x() - TimelineWidget::kNameW) / TimelineWidget::kCell;
+            const int f = (p.x() - TimelineWidget::kNameW) / timeline_->cell();
             gotoFrame(std::clamp(f, 0, doc_->frameCount() - 1));
         } else if (e->type() == QEvent::MouseButtonRelease && scrubActive_) {
             scrubActive_ = false;

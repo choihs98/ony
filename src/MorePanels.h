@@ -1,5 +1,7 @@
 #pragma once
 #include <QDockWidget>
+#include <QHash>
+#include <QImage>
 #include <QWidget>
 
 class CanvasWidget;
@@ -35,6 +37,33 @@ private:
     void moveTo(const QPoint& pos);
     Document* doc_;
     CanvasWidget* canvas_;
+};
+
+// 플립 패널: 프레임을 빠르게 넘겨 보며 움직임을 확인한다 (슬라이더 드래그 / 자동 플립)
+class FlipPanel : public QWidget {
+    Q_OBJECT
+public:
+    FlipPanel(Document* doc, QWidget* parent = nullptr);
+protected:
+    void paintEvent(QPaintEvent*) override;
+    void mousePressEvent(QMouseEvent*) override;
+    void mouseMoveEvent(QMouseEvent*) override;
+private:
+    void scrubTo(const QPoint& pos);
+    void tick();
+    QImage frameImage(int f);
+    Document* doc_;
+    class QSpinBox* from_;
+    class QSpinBox* to_;
+    class QSpinBox* fps_;
+    class QComboBox* mode_;
+    class QPushButton* play_;
+    class QTimer* timer_;
+    int flipFrame_ = 0;
+    int dir_ = 1;
+    QRect previewRect() const;
+    QHash<int, QImage> cache_;
+    qint64 cacheStamp_ = -1;
 };
 
 // 가이드라인 패널

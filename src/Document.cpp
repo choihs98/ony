@@ -1,4 +1,5 @@
 #include "Document.h"
+#include <QFileInfo>
 #include "Blend.h"
 
 #include <QDataStream>
@@ -49,9 +50,14 @@ void Document::newProject(QSize size, int frameCount, int fps) {
     folders_.clear();
     cameraEnabled_ = false;
     cameraKeys_.clear();
+    renderCam_ = RenderCamera();
+    strokes_.clear();
+    recording_ = false;
     libNames_.clear();
     libImages_.clear();
-    audioPath_.clear();
+    audioTracks_.clear();
+    masterVolume_ = 1.0;
+    masterMuted_ = false;
     notes_.clear();
     bookmarks_.clear();
     bookmarksOn_ = true;
@@ -287,9 +293,10 @@ void Document::drawLayers(QImage& target, const QTransform& xf, int frame) const
         if (k < 0) continue;
         QImage img = L.frames[k];
         for (const auto& fx : L.fx) img = Effects::apply(img, fx);
+        const QTransform lxf = L.puppet ? puppetTransform(l, frame) * xf : xf;
         if (L.blend == 0) {
             QPainter p(&target);
-            p.setTransform(xf);
+            p.setTransform(lxf);
             p.setOpacity(op);
             p.drawImage(0, 0, img);
         } else {
@@ -298,7 +305,7 @@ void Document::drawLayers(QImage& target, const QTransform& xf, int frame) const
             layerImg.fill(Qt::transparent);
             {
                 QPainter p(&layerImg);
-                p.setTransform(xf);
+                p.setTransform(lxf);
                 p.drawImage(0, 0, img);
             }
             Blend::apply(target, layerImg, L.blend, op);
@@ -383,6 +390,7 @@ int Document::duplicateLayer(int i) {
     Layer l = layers_[i];
     l.name += QStringLiteral(" 복사");
     l.ctgLines = false;
+    if (l.puppet) l.puppetId = nextPuppetId_++;
     layers_.insert(i + 1, l);
     curLayer_ = i + 1;
     undo_->clear();
@@ -557,20 +565,202 @@ void Document::setCameraEnabled(bool on) {
     emit changed();
 }
 
-CameraKey Document::cameraAt(int frame) const {
+static CameraKey interpKeys(const QMap<int, CameraKey>& cameraKeys_, int frame) {
     if (cameraKeys_.isEmpty()) return CameraKey();
     auto hi = cameraKeys_.lowerBound(frame); // frame 이상인 첫 키
     if (hi == cameraKeys_.begin()) return hi.value();
     if (hi == cameraKeys_.end()) return std::prev(hi).value();
     if (hi.key() == frame) return hi.value();
     auto lo = std::prev(hi);
-    const double t = double(frame - lo.key()) / double(hi.key() - lo.key());
+    double t = double(frame - lo.key()) / double(hi.key() - lo.key());
+    switch (lo.value().ease) {
+    case 1: t = t * t * t; break;                                   // 느리게 시작
+    case 2: t = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t); break;     // 느리게 끝
+    case 3: t = t * t * (3.0 - 2.0 * t); break;                     // 느리게 시작·끝
+    case 4: t = 0.0; break;                                         // 계단
+    default: break;
+    }
     CameraKey a = lo.value(), b = hi.value(), r;
+    r.ease = a.ease;
     r.x = a.x + (b.x - a.x) * t;
     r.y = a.y + (b.y - a.y) * t;
     r.scale = a.scale + (b.scale - a.scale) * t;
     r.rotation = a.rotation + (b.rotation - a.rotation) * t;
     return r;
+}
+
+CameraKey Document::cameraAt(int frame) const { return interpKeys(cameraKeys_, frame); }
+
+// ---------------- 드로잉 레코더 ----------------
+void Document::addStroke(const StrokeRec& s) {
+    if (s.pts.isEmpty()) return;
+    strokes_.push_back(s);
+    if (strokes_.size() > 5000) strokes_.remove(0, strokes_.size() - 5000);
+    setModified(true);
+    emit recorderChanged();
+}
+
+void Document::clearStrokes(int frame) {
+    if (frame < 0) strokes_.clear();
+    else
+        for (int i = strokes_.size() - 1; i >= 0; --i)
+            if (strokes_[i].frame == frame) strokes_.remove(i);
+    setModified(true);
+    emit recorderChanged();
+}
+
+int Document::strokeCount(int frame) const {
+    if (frame < 0) return strokes_.size();
+    int n = 0;
+    for (const auto& s : strokes_) n += s.frame == frame ? 1 : 0;
+    return n;
+}
+
+QImage Document::renderStrokes(int frame, double fraction, bool byTime) const {
+    QImage acc(size_, QImage::Format_ARGB32_Premultiplied);
+    acc.fill(Qt::transparent);
+    QVector<const StrokeRec*> list;
+    for (const auto& s : strokes_)
+        if (s.frame == frame) list.push_back(&s);
+    if (list.isEmpty()) return acc;
+    auto weightOf = [&](const StrokeRec& s) {
+        if (byTime) return double(std::max(80, s.ms.isEmpty() ? 80 : s.ms.last()));
+        double len = 10;
+        for (int i = 1; i < s.pts.size(); ++i) len += std::hypot(s.pts[i].x() - s.pts[i - 1].x(), s.pts[i].y() - s.pts[i - 1].y());
+        return len;
+    };
+    double total = 0;
+    for (auto* s : list) total += weightOf(*s);
+    double budget = std::clamp(fraction, 0.0, 1.0) * total;
+    int si = 0;
+    for (auto* sp : list) {
+        const StrokeRec& s = *sp;
+        const double w = weightOf(s);
+        if (budget <= 0) break;
+        const double part = std::min(1.0, budget / w);   // 이 획을 얼마나 그릴지
+        budget -= w;
+        QImage buf(size_, QImage::Format_ARGB32_Premultiplied);
+        buf.fill(Qt::transparent);
+        QRandomGenerator rng(1234 + si++);
+        BrushDabCache cache;
+        double carry = 0;
+        const QColor col = s.eraser ? QColor(Qt::black) : s.color;
+        const int n = s.pts.size();
+        // part 까지의 지점을 계산: 점 목록을 비율만큼 사용하고 마지막 구간은 보간한다
+        const double upTo = part * (n - 1);
+        brushStampAt(buf, s.brush, col, s.pts[0], s.pressure.value(0, 1.0), rng, cache);
+        for (int i = 1; i < n && i - 1 < upTo + 1e-9; ++i) {
+            double u = std::min(1.0, upTo - (i - 1));
+            const QPointF a = s.pts[i - 1];
+            const QPointF b = a + (s.pts[i] - a) * u;
+            const double pa = s.pressure.value(i - 1, 1.0);
+            const double pb = pa + (s.pressure.value(i, 1.0) - pa) * u;
+            brushStampAlong(buf, s.brush, col, a, b, pa, pb, carry, rng, cache);
+        }
+        if (!s.eraser || true) brushApplyGrain(buf, brushPreset(s.brush.preset).grain);
+        QPainter p(&acc);
+        p.setOpacity(s.brush.opacity / 100.0);
+        if (s.eraser) p.setCompositionMode(QPainter::CompositionMode_DestinationOut);
+        p.drawImage(0, 0, buf);
+    }
+    return acc;
+}
+
+int Document::strokesToFrames(int srcFrame, int startFrame, int nFrames, bool byTime) {
+    if (strokeCount(srcFrame) == 0 || nFrames < 2 || startFrame < 0) return -1;
+    if (startFrame + nFrames > frameCount_) setFrameCount(startFrame + nFrames);
+    Layer L;
+    L.name = QStringLiteral("획 애니메이션");
+    L.frames.resize(frameCount_);
+    for (int j = 0; j < nFrames; ++j)
+        L.frames[startFrame + j] = renderStrokes(srcFrame, double(j + 1) / nFrames, byTime);
+    layers_.push_back(L);
+    curLayer_ = layers_.size() - 1;
+    undo_->clear();
+    setModified(true);
+    notifyStructure();
+    emit currentChanged();
+    return curLayer_;
+}
+
+// ---------------- 퍼펫 ----------------
+void Document::setPuppet(int l, bool on) {
+    if (l < 0 || l >= layers_.size()) return;
+    Layer& L = layers_[l];
+    if (L.puppet == on) return;
+    L.puppet = on;
+    if (on && L.puppetId == 0) L.puppetId = nextPuppetId_++;
+    setModified(true);
+    notifyStructure();
+}
+
+CameraKey Document::puppetAt(int l, int frame) const {
+    if (l < 0 || l >= layers_.size() || layers_[l].pkeys.isEmpty()) return CameraKey();
+    return interpKeys(layers_[l].pkeys, frame);
+}
+
+int Document::puppetParentLayer(int l) const {
+    if (l < 0 || l >= layers_.size() || layers_[l].puppetParent == 0) return -1;
+    for (int i = 0; i < layers_.size(); ++i)
+        if (i != l && layers_[i].puppet && layers_[i].puppetId == layers_[l].puppetParent) return i;
+    return -1;
+}
+
+QTransform Document::puppetTransform(int l, int frame) const {
+    QTransform total;
+    int cur = l, guard = 0;
+    while (cur >= 0 && guard++ < 16) {            // 자식 → 부모 순으로 곱한다 (순환 연결은 16단계에서 끊는다)
+        const Layer& L = layers_[cur];
+        if (!L.puppet) break;
+        const CameraKey k = puppetAt(cur, frame);
+        const double px = L.pivotX < 0 ? size_.width() / 2.0 : L.pivotX;
+        const double py = L.pivotY < 0 ? size_.height() / 2.0 : L.pivotY;
+        const double s = std::max(0.01, double(k.scale));
+        QTransform t;
+        t.translate(k.x, k.y);
+        t.translate(px, py);
+        t.rotate(k.rotation);
+        t.scale(s, s);
+        t.translate(-px, -py);
+        total = total * t;
+        cur = puppetParentLayer(cur);
+    }
+    return total;
+}
+
+void Document::setPuppetKey(int l, int frame, const CameraKey& k) {
+    if (l < 0 || l >= layers_.size() || !layers_[l].puppet) return;
+    layers_[l].pkeys[frame] = k;
+    setModified(true);
+    notifyStructure();
+}
+
+void Document::removePuppetKey(int l, int frame) {
+    if (l < 0 || l >= layers_.size() || !layers_[l].pkeys.remove(frame)) return;
+    setModified(true);
+    notifyStructure();
+}
+
+void Document::setPuppetPivot(int l, qreal x, qreal y) {
+    if (l < 0 || l >= layers_.size()) return;
+    layers_[l].pivotX = x;
+    layers_[l].pivotY = y;
+    setModified(true);
+    notifyStructure();
+}
+
+void Document::setPuppetParent(int l, int parent) {
+    if (l < 0 || l >= layers_.size()) return;
+    if (parent < 0 || parent >= layers_.size() || parent == l || !layers_[parent].puppet) {
+        layers_[l].puppetParent = 0;
+    } else {
+        // 순환 방지: parent 의 조상에 l 이 있으면 거절
+        for (int cur = parent, guard = 0; cur >= 0 && guard < 16; cur = puppetParentLayer(cur), ++guard)
+            if (cur == l) return;
+        layers_[l].puppetParent = layers_[parent].puppetId;
+    }
+    setModified(true);
+    notifyStructure();
 }
 
 void Document::setCameraKey(int frame, const CameraKey& k) {
@@ -622,8 +812,64 @@ void Document::removeFromLibrary(int i) {
 }
 
 void Document::setAudioPath(const QString& p) {
-    audioPath_ = p;
+    audioTracks_.clear();
+    if (!p.isEmpty()) {
+        AudioTrack t;
+        t.path = p;
+        t.name = QFileInfo(p).completeBaseName();
+        audioTracks_.push_back(t);
+    }
     setModified(true);
+    emit audioChanged();
+}
+
+int Document::addAudioTrack(const QString& path, const QString& name) {
+    AudioTrack t;
+    t.path = path;
+    t.name = name.isEmpty() ? QFileInfo(path).completeBaseName() : name;
+    audioTracks_.push_back(t);
+    setModified(true);
+    emit audioChanged();
+    return audioTracks_.size() - 1;
+}
+
+void Document::removeAudioTrack(int i) {
+    if (i < 0 || i >= audioTracks_.size()) return;
+    audioTracks_.removeAt(i);
+    setModified(true);
+    emit audioChanged();
+}
+
+int Document::duplicateAudioTrack(int i) {
+    if (i < 0 || i >= audioTracks_.size()) return -1;
+    AudioTrack t = audioTracks_[i];
+    t.name += QStringLiteral(" 복사");
+    audioTracks_.push_back(t);
+    setModified(true);
+    emit audioChanged();
+    return audioTracks_.size() - 1;
+}
+
+void Document::moveAudioTrack(int i, int delta) {
+    const int j = i + delta;
+    if (i < 0 || j < 0 || i >= audioTracks_.size() || j >= audioTracks_.size()) return;
+    audioTracks_.swapItemsAt(i, j);
+    setModified(true);
+    emit audioChanged();
+}
+
+void Document::updateAudioTrack(int i, const AudioTrack& t) {
+    if (i < 0 || i >= audioTracks_.size()) return;
+    audioTracks_[i] = t;
+    setModified(true);
+    emit audioChanged();
+}
+
+void Document::setMaster(double volume, bool muted) {
+    masterVolume_ = volume;
+    masterMuted_ = muted;
+    setModified(true);
+    emit audioChanged();
 }
 
 // ---------------- 실행 취소 ----------------
@@ -661,6 +907,17 @@ QVariantMap layerExtSave(const Layer& l) {
     for (auto it = l.imageMarks.cbegin(); it != l.imageMarks.cend(); ++it) marks[QString::number(it.key())] = it.value();
     m["names"] = names;
     m["marks"] = marks;
+    if (l.puppet) {
+        m["puppet"] = true;
+        m["pid"] = l.puppetId;
+        m["ppar"] = l.puppetParent;
+        m["pivx"] = l.pivotX;
+        m["pivy"] = l.pivotY;
+        QVariantList pk;
+        for (auto it = l.pkeys.cbegin(); it != l.pkeys.cend(); ++it)
+            pk << QVariant(QVariantList{it.key(), it.value().x, it.value().y, it.value().scale, it.value().rotation, it.value().ease});
+        m["pkeys"] = pk;
+    }
     return m;
 }
 
@@ -677,6 +934,19 @@ void layerExtLoad(Layer& l, const QVariantMap& m) {
     const QVariantMap names = m.value("names").toMap(), marks = m.value("marks").toMap();
     for (auto it = names.cbegin(); it != names.cend(); ++it) l.instanceNames[it.key().toInt()] = it.value().toString();
     for (auto it = marks.cbegin(); it != marks.cend(); ++it) l.imageMarks[it.key().toInt()] = it.value().toInt();
+    l.puppet = m.value("puppet", false).toBool();
+    l.puppetId = m.value("pid", 0).toInt();
+    l.puppetParent = m.value("ppar", 0).toInt();
+    l.pivotX = m.value("pivx", -1).toDouble();
+    l.pivotY = m.value("pivy", -1).toDouble();
+    l.pkeys.clear();
+    for (const QVariant& v : m.value("pkeys").toList()) {
+        const QVariantList e = v.toList();
+        if (e.size() < 6) continue;
+        CameraKey k;
+        k.x = e[1].toDouble(); k.y = e[2].toDouble(); k.scale = e[3].toDouble(); k.rotation = e[4].toDouble(); k.ease = e[5].toInt();
+        l.pkeys[e[0].toInt()] = k;
+    }
 }
 } // namespace
 
@@ -687,12 +957,37 @@ QVariantMap Document::extraSave() const {
     m["bookmarks"] = bm;
     m["bookmarksOn"] = bookmarksOn_;
     QVariantList mc;
-    for (const MarkColor& c : markColors_) mc << QVariantList{c.name, c.color.name()};
+    for (const MarkColor& c : markColors_) mc << QVariant(QVariantList{c.name, c.color.name()});
     m["markColors"] = mc;
+    QVariantList at;
+    for (const AudioTrack& t : audioTracks_)
+        at << QVariantMap{{"path", t.path}, {"name", t.name}, {"volume", t.volume}, {"offset", t.offsetFrames}, {"muted", t.muted}, {"locked", t.locked}};
+    m["audioTracks"] = at;
+    QVariantMap ease;
+    for (auto it = cameraKeys_.cbegin(); it != cameraKeys_.cend(); ++it)
+        if (it.value().ease != 0) ease[QString::number(it.key())] = it.value().ease;
+    m["cameraEase"] = ease;
+    QVariantList sl;
+    for (const StrokeRec& s : strokes_) {
+        QVariantList pts;
+        for (int i = 0; i < s.pts.size(); ++i) pts << s.pts[i].x() << s.pts[i].y() << double(s.pressure.value(i, 1.0f)) << s.ms.value(i, 0);
+        sl << QVariant(QVariantMap{{"layer", s.layer}, {"frame", s.frame}, {"size", s.brush.size}, {"op", s.brush.opacity},
+                                   {"hard", s.brush.hardness}, {"press", s.brush.pressure}, {"preset", s.brush.preset},
+                                   {"color", s.color.name(QColor::HexArgb)}, {"eraser", s.eraser}, {"pts", pts}});
+    }
+    m["strokes"] = sl;
+    m["renderCam"] = QVariantMap{{"on", renderCam_.on}, {"w", renderCam_.size.width()}, {"h", renderCam_.size.height()}, {"fit", renderCam_.fit}};
+    m["masterVolume"] = masterVolume_;
+    m["masterMuted"] = masterMuted_;
     return m;
 }
 
 void Document::extraLoad(const QVariantMap& m) {
+    {
+        const QVariantMap ease = m.value("cameraEase").toMap();
+        for (auto it = ease.cbegin(); it != ease.cend(); ++it)
+            if (cameraKeys_.contains(it.key().toInt())) cameraKeys_[it.key().toInt()].ease = it.value().toInt();
+    }
     bookmarks_.clear();
     for (const QVariant& v : m.value("bookmarks").toList()) bookmarks_.insert(v.toInt());
     bookmarksOn_ = m.value("bookmarksOn", true).toBool();
@@ -701,6 +996,49 @@ void Document::extraLoad(const QVariantMap& m) {
         const QVariantList e = v.toList();
         if (e.size() == 2) mc.push_back({e[0].toString(), QColor(e[1].toString())});
     }
+    if (m.contains("audioTracks")) { // 여러 트랙 (이전 파일에는 없다 → 위에서 읽은 단일 소리를 유지)
+        audioTracks_.clear();
+        for (const QVariant& v : m.value("audioTracks").toList()) {
+            const QVariantMap e = v.toMap();
+            AudioTrack t;
+            t.path = e.value("path").toString();
+            t.name = e.value("name").toString();
+            t.volume = e.value("volume", 1.0).toDouble();
+            t.offsetFrames = e.value("offset", 0).toInt();
+            t.muted = e.value("muted", false).toBool();
+            t.locked = e.value("locked", false).toBool();
+            audioTracks_.push_back(t);
+        }
+    }
+    {
+        const QVariantMap rc = m.value("renderCam").toMap();
+        renderCam_.on = rc.value("on", false).toBool();
+        renderCam_.size = QSize(std::clamp(rc.value("w", 1920).toInt(), 16, 16384), std::clamp(rc.value("h", 1080).toInt(), 16, 16384));
+        renderCam_.fit = std::clamp(rc.value("fit", 0).toInt(), 0, 2);
+    }
+    strokes_.clear();
+    for (const QVariant& v : m.value("strokes").toList()) {
+        const QVariantMap e = v.toMap();
+        StrokeRec s;
+        s.layer = e.value("layer").toInt();
+        s.frame = e.value("frame").toInt();
+        s.brush.size = e.value("size", 6).toInt();
+        s.brush.opacity = e.value("op", 100).toInt();
+        s.brush.hardness = e.value("hard", 85).toInt();
+        s.brush.pressure = e.value("press").toBool();
+        s.brush.preset = e.value("preset").toInt();
+        s.color = QColor(e.value("color", "#ff000000").toString());
+        s.eraser = e.value("eraser").toBool();
+        const QVariantList pts = e.value("pts").toList();
+        for (int i = 0; i + 3 < pts.size(); i += 4) {
+            s.pts.push_back(QPointF(pts[i].toDouble(), pts[i + 1].toDouble()));
+            s.pressure.push_back(pts[i + 2].toFloat());
+            s.ms.push_back(pts[i + 3].toInt());
+        }
+        if (!s.pts.isEmpty()) strokes_.push_back(s);
+    }
+    masterVolume_ = m.value("masterVolume", 1.0).toDouble();
+    masterMuted_ = m.value("masterMuted", false).toBool();
     markColors_ = mc.isEmpty() ? QVector<MarkColor>{{QStringLiteral("빨강"), QColor(0xe5, 0x39, 0x35)}} : mc;
 }
 
@@ -724,7 +1062,7 @@ bool Document::save(const QString& path) {
            << double(it.value().rotation);
     ds << qint32(libNames_.size());
     for (int i = 0; i < libNames_.size(); ++i) ds << libNames_[i] << libImages_[i];
-    ds << audioPath_;
+    ds << audioPath();
     ds << qint32(notes_.size());
     for (auto it = notes_.cbegin(); it != notes_.cend(); ++it) ds << qint32(it.key()) << it.value();
     // 확장 블록: 새 기능은 키-값으로 덧붙여서 포맷 버전을 올리지 않아도 된다
@@ -777,7 +1115,7 @@ bool Document::load(const QString& path) {
             for (int k = 0; k < nfx; ++k) {
                 qint32 t = 0, p = 0;
                 ds >> t >> p;
-                if (t < 0 || t > int(Effects::Type::Blur)) return false;
+                if (t < 0 || t > int(Effects::Type::Last)) return false;
                 l.fx.push_back({Effects::Type(t), p});
             }
         }
@@ -860,12 +1198,22 @@ bool Document::load(const QString& path) {
     fps_ = fps;
     frameCount_ = frames;
     layers_ = std::move(loaded);
+    renderCam_ = RenderCamera();
+    strokes_.clear();
+    nextPuppetId_ = 1;
+    for (const Layer& pl : layers_) nextPuppetId_ = std::max(nextPuppetId_, pl.puppetId + 1);
     folders_ = std::move(loadedFolders);
     cameraEnabled_ = camOn;
     cameraKeys_ = std::move(camKeys);
     libNames_ = std::move(libNames);
     libImages_ = std::move(libImages);
-    audioPath_ = audio;
+    audioTracks_.clear();
+    if (!audio.isEmpty()) {
+        AudioTrack t;
+        t.path = audio;
+        t.name = QFileInfo(audio).completeBaseName();
+        audioTracks_.push_back(t);
+    }
     notes_ = std::move(loadedNotes);
     extraLoad(pendingExt);
     curLayer_ = 0;
@@ -886,6 +1234,43 @@ void Document::setModified(bool m) {
     if (modified_ == m) return;
     modified_ = m;
     emit modifiedChanged();
+}
+
+QImage Document::renderFrame(int frame, const QColor& bg, bool useCamera) const {
+    Document* self = const_cast<Document*>(this);
+    const int keep = proxyDiv_;
+    self->proxyDiv_ = 1;
+    QImage world(size_, QImage::Format_ARGB32_Premultiplied);
+    world.fill(Qt::transparent);
+    drawLayers(world, QTransform(), frame);
+    self->proxyDiv_ = keep;
+    QImage out(size_, QImage::Format_ARGB32_Premultiplied);
+    out.fill(bg.alpha() == 0 ? QColor(Qt::transparent) : bg);
+    QPainter p(&out);
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    if (useCamera && cameraEnabled_) {
+        p.setTransform(cameraTransform(cameraAt(frame)));
+        if (bg.alpha() != 0) p.fillRect(QRect(QPoint(0, 0), size_), bg);
+    }
+    p.drawImage(0, 0, world);
+    p.end();
+    if (renderCam_.on && renderCam_.size.isValid() && renderCam_.size != size_) {
+        const QSize rs = renderCam_.size;
+        QImage fin(rs, QImage::Format_ARGB32_Premultiplied);
+        fin.fill(bg.alpha() == 0 ? QColor(Qt::transparent) : bg);
+        QPainter q(&fin);
+        q.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        if (renderCam_.fit == 2) {
+            q.drawImage(QRect(QPoint(0, 0), rs), out);
+        } else {
+            const double sx = double(rs.width()) / size_.width(), sy = double(rs.height()) / size_.height();
+            const double s = renderCam_.fit == 1 ? std::max(sx, sy) : std::min(sx, sy);
+            const QSizeF ds(size_.width() * s, size_.height() * s);
+            q.drawImage(QRectF((rs.width() - ds.width()) / 2, (rs.height() - ds.height()) / 2, ds.width(), ds.height()), out);
+        }
+        return fin;
+    }
+    return out;
 }
 
 bool Document::exportFrame(int frame, const QString& path) const {
@@ -913,4 +1298,136 @@ void Document::notifyStructure() {
     setModified(true);
     emit structureChanged();
     emit changed();
+}
+
+void Document::reverseKeys(int layer, int a, int b) {
+    if (layer < 0 || layer >= layers_.size()) return;
+    a = std::clamp(a, 0, frameCount_ - 1);
+    b = std::clamp(b, 0, frameCount_ - 1);
+    if (a >= b) return;
+    auto& fr = layers_[layer].frames;
+    // 구간 안의 (키 위치, 이미지) 를 모아 위치만 거울처럼 뒤집는다
+    QVector<QPair<int, QImage>> keys;
+    for (int f = a; f <= b; ++f)
+        if (!fr[f].isNull()) keys.push_back({f, fr[f]});
+    if (keys.size() < 2) return;
+    // 각 키의 노출 길이를 유지한 채 순서만 뒤집는다
+    QVector<int> lens;
+    for (int i = 0; i < keys.size(); ++i) {
+        const int next = i + 1 < keys.size() ? keys[i + 1].first : b + 1;
+        lens.push_back(next - keys[i].first);
+    }
+    for (int f = a; f <= b; ++f) fr[f] = QImage();
+    int pos = keys.first().first;
+    for (int i = keys.size() - 1; i >= 0; --i) {
+        fr[pos] = keys[i].second;
+        pos += lens[i];
+    }
+    undo_->clear();
+    notifyStructure();
+    setModified(true);
+}
+
+void Document::setUniformExposure(int layer, int n) {
+    if (layer < 0 || layer >= layers_.size() || n < 1) return;
+    auto& fr = layers_[layer].frames;
+    QVector<QImage> imgs;
+    for (const QImage& im : fr)
+        if (!im.isNull()) imgs.push_back(im);
+    if (imgs.isEmpty()) return;
+    const int start = [&] { for (int f = 0; f < fr.size(); ++f) if (!fr[f].isNull()) return f; return 0; }();
+    for (QImage& im : fr) im = QImage();
+    for (int i = 0, pos = start; i < imgs.size() && pos < frameCount_; ++i, pos += n) fr[pos] = imgs[i];
+    undo_->clear();
+    notifyStructure();
+    setModified(true);
+}
+
+bool Document::saveCopy(const QString& path) {
+    const QString keepPath = path_;
+    const bool keepMod = modified();
+    const bool ok = save(path);
+    path_ = keepPath;
+    if (keepMod) setModified(true);
+    return ok;
+}
+
+int Document::repeatKeys(int layer, int a, int b, int times, bool pingpong) {
+    if (layer < 0 || layer >= layers_.size() || times < 1) return 0;
+    a = std::clamp(a, 0, frameCount_ - 1);
+    b = std::clamp(b, a, frameCount_ - 1);
+    // 구간을 (이미지, 노출 길이) 목록으로 만든다. 구간 맨 앞이 홀드면 직전 키 이미지를 이어받는다.
+    struct Seg { QImage img; int len; };
+    QVector<Seg> segs;
+    const auto& fr = layers_[layer].frames;
+    int k0 = keyIndexAt(layer, a);
+    if (k0 < 0) return 0;
+    QVector<int> keyPos;
+    keyPos << a;
+    for (int f = a + 1; f <= b; ++f)
+        if (!fr[f].isNull()) keyPos << f;
+    for (int i = 0; i < keyPos.size(); ++i) {
+        const int next = i + 1 < keyPos.size() ? keyPos[i + 1] : b + 1;
+        segs.push_back({keyImage(layer, i == 0 ? k0 : keyPos[i]), next - keyPos[i]});
+    }
+    const int len = b - a + 1;
+    const int needEnd = b + len * times;
+    if (needEnd >= frameCount_) setFrameCount(needEnd + 1);
+    auto& frames = layers_[layer].frames;
+    int pos = b + 1;
+    for (int t = 1; t <= times; ++t) {
+        QVector<Seg> s = segs;
+        if (pingpong && t % 2 == 1) std::reverse(s.begin(), s.end());
+        // 첫 칸은 반드시 키 이미지여야 하므로 이전 구간의 끝과 같은 이미지라도 새 키로 둔다
+        for (const Seg& g : s) {
+            if (pos < frames.size()) frames[pos] = g.img;
+            pos += g.len;
+        }
+    }
+    undo_->clear();
+    notifyStructure();
+    setModified(true);
+    return len * times;
+}
+
+void Document::stretchToFps(int newFps) {
+    newFps = std::max(1, newFps);
+    if (newFps == fps_) return;
+    const double ratio = double(newFps) / fps_;
+    auto mapF = [ratio](int f) { return int(f * ratio + 0.5); };
+    const int newCount = std::max(1, mapF(frameCount_));
+    for (auto& l : layers_) {
+        QVector<QImage> nf(newCount);
+        for (int f = 0; f < l.frames.size(); ++f) {
+            if (l.frames[f].isNull()) continue;
+            const int t = std::min(newCount - 1, mapF(f));
+            if (nf[t].isNull()) nf[t] = l.frames[f]; // 같은 칸에 겹치면 앞의 이미지를 남긴다
+        }
+        // 이름/마크 위치도 함께 옮긴다
+        QMap<int, QString> inst;
+        for (auto it = l.instanceNames.cbegin(); it != l.instanceNames.cend(); ++it) inst[std::min(newCount - 1, mapF(it.key()))] = it.value();
+        QMap<int, int> marks;
+        for (auto it = l.imageMarks.cbegin(); it != l.imageMarks.cend(); ++it) marks[std::min(newCount - 1, mapF(it.key()))] = it.value();
+        l.instanceNames = inst;
+        l.imageMarks = marks;
+        if (l.endFrame >= 0) l.endFrame = std::min(newCount, mapF(l.endFrame));
+        l.frames = nf;
+    }
+    QMap<int, CameraKey> ck;
+    for (auto it = cameraKeys_.cbegin(); it != cameraKeys_.cend(); ++it) ck[std::min(newCount - 1, mapF(it.key()))] = it.value();
+    cameraKeys_ = ck;
+    QSet<int> bm;
+    for (int b : bookmarks_) bm.insert(std::min(newCount - 1, mapF(b)));
+    bookmarks_ = bm;
+    QMap<int, QString> nn;
+    for (auto it = notes_.cbegin(); it != notes_.cend(); ++it) nn[std::min(newCount - 1, mapF(it.key()))] = it.value();
+    notes_ = nn;
+    for (AudioTrack& t : audioTracks_) t.offsetFrames = mapF(t.offsetFrames);
+    frameCount_ = newCount;
+    fps_ = newFps;
+    curFrame_ = std::min(mapF(curFrame_), frameCount_ - 1);
+    undo_->clear();
+    setModified(true);
+    notifyStructure();
+    emit currentChanged();
 }

@@ -14,7 +14,7 @@ if(WIN32)
 endif()
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia)
-find_package(Qt6 OPTIONAL_COMPONENTS Test)
+find_package(Qt6 OPTIONAL_COMPONENTS Test PrintSupport)
 
 add_library(tvpcore STATIC
     src/Document.h src/Document.cpp
@@ -25,9 +25,14 @@ add_library(tvpcore STATIC
     src/Style.h src/Style.cpp
     src/Blend.h src/Blend.cpp
     src/VideoExport.h src/VideoExport.cpp
+    src/Print.h src/Print.cpp
 )
 target_include_directories(tvpcore PUBLIC src)
 target_link_libraries(tvpcore PUBLIC Qt6::Widgets)
+if(TARGET Qt6::PrintSupport)
+    target_link_libraries(tvpcore PUBLIC Qt6::PrintSupport)
+    target_compile_definitions(tvpcore PUBLIC ONY_HAS_PRINT)
+endif()
 
 set(UI_SOURCES
     src/MainWindow.h src/MainWindow.cpp
@@ -71,4 +76,9 @@ endif()
 if(TARGET Qt6::Test)
     add_executable(demo tests/demo.cpp ${UI_SOURCES})
     target_link_libraries(demo PRIVATE tvpcore Qt6::Multimedia Qt6::Test)
+endif()
+
+if(TARGET Qt6::Test AND EXISTS ${CMAKE_SOURCE_DIR}/tests/bench.cpp)
+    add_executable(bench tests/bench.cpp ${UI_SOURCES})
+    target_link_libraries(bench PRIVATE tvpcore Qt6::Multimedia Qt6::Test)
 endif()

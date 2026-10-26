@@ -84,7 +84,7 @@ QScrollBar::handle:vertical { background: %6; min-height: 24px; border-radius: 3
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QSlider::groove:horizontal { height: 4px; background: %2; border-radius: 2px; }
 QSlider::sub-page:horizontal { background: %7; border-radius: 2px; }
-QSlider::handle:horizontal { width: 10px; margin: -5px 0; background: %12; border: 1px solid %9; border-radius: 2px; }
+QSlider::handle:horizontal { width: 10px; margin: -5px 0; background: %11; border: 1px solid %9; border-radius: 2px; }
 QTabBar::tab { background: %6; color: %4; padding: 3px 14px; border: 1px solid %9; border-bottom: 0; min-width: 90px; }
 QTabBar::tab:selected { background: %7; color: white; }
 QTabBar::tab:!selected:hover { background: %10; }
@@ -95,8 +95,7 @@ QSplitter::handle:vertical { height: 3px; }
 QMainWindow::separator { background: %2; width: 3px; height: 3px; }
 )");
     return css.arg(s.window.name(), s.dark.name(), s.base.name(), s.text.name(), s.muted.name(), s.button.name(), hl)
-        .arg(border, hover, pressed) // %9 %10 %11
-        .arg(dark ? s.text.darker(120).name() : s.button.lighter(110).name()); // %12
+        .arg(border, hover, pressed); // %9 %10 %11
 }
 
 void apply(int index) {

@@ -10,6 +10,7 @@
 #include <functional>
 
 #include "Brush.h"
+#include "Document.h"
 #include "Warp.h"
 
 class Document;
@@ -50,9 +51,16 @@ public:
 
     // 라이트 테이블 설정
     struct LightTableParams {
-        int prev = 1;
-        int next = 1;
-        int opacity = 35; // %
+        enum Mode { Instance, Frame, Bookmark, ImageMark };
+        static constexpr int kSlots = 8;
+        int mode = Instance;
+        int colorMode = 0;               // 0 = 색 입히기, 1 = 원래 색, 2 = 거리에 따라 옅어지는 그라데이션
+        QColor prevColor{0x40, 0xc0, 0x60};   // 이전 이미지 (초록)
+        QColor nextColor{0xff, 0x90, 0x20};   // 다음 이미지 (주황)
+        int prevOp[kSlots] = {60, 45, 32, 22, 0, 0, 0, 0};   // 가까운 것부터, % (0 = 끔)
+        int nextOp[kSlots] = {60, 45, 32, 22, 0, 0, 0, 0};
+        bool blendToFront = false;       // 라이트 테이블 이미지를 현재 이미지 위에 표시
+        bool allLayers = false;          // 보이는 모든 레이어에 적용
     };
     void setLightTableParams(const LightTableParams& p) { ltParams_ = p; update(); }
     LightTableParams lightTableParams() const { return ltParams_; }
@@ -92,6 +100,11 @@ protected:
     void resizeEvent(QResizeEvent*) override;
 
 private:
+    QRect dirty_;
+    void markDirty(const QRectF& r);
+    StrokeRec rec_;
+    bool recActive_ = false;
+    QElapsedTimer recClock_;
     QColor backdrop_{0x2d, 0x31, 0x36};
     QImage stencilMask_;
     class QVariantAnimation* zoomAnim_ = nullptr;

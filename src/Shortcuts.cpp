@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "Shortcuts.h"
 
 #include <QDialog>
@@ -146,10 +147,16 @@ void showShortcutDialog(QWidget* parent) {
     lay->addWidget(note);
 
     QVector<QKeySequenceEdit*> edits;
-    const auto cmds = S.commands();
+    auto cmds = S.commands();
+    std::stable_sort(cmds.begin(), cmds.end(), [](const auto& a, const auto& b) { return a.category < b.category; });
     table->setRowCount(cmds.size());
     for (int r = 0; r < cmds.size(); ++r) {
-        table->setItem(r, 0, new QTableWidgetItem(cmds[r].category));
+        auto* ci = new QTableWidgetItem(cmds[r].category);
+        if (r == 0 || cmds[r - 1].category != cmds[r].category) {
+            QFont f = ci->font(); f.setBold(true); ci->setFont(f);
+            ci->setBackground(QColor(128, 128, 128, 40));
+        }
+        table->setItem(r, 0, ci);
         table->setItem(r, 1, new QTableWidgetItem(cmds[r].label));
         auto* ed = new QKeySequenceEdit(S.current(cmds[r].id));
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)

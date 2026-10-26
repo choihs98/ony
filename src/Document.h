@@ -14,9 +14,18 @@
 #include <algorithm>
 #include <functional>
 
+#include "Brush.h"
 #include "Effects.h"
 
 class QUndoStack;
+
+struct CameraKey {
+    qreal x = 0, y = 0;       // 카메라 중심의 이동량(픽셀)
+    qreal scale = 1.0;        // 1.0 = 100%
+    qreal rotation = 0;       // 도
+    // 이 키에서 다음 키까지의 속도 곡선: 0 직선, 1 느리게 시작, 2 느리게 끝, 3 느리게 시작·끝, 4 계단(다음 키에서 한 번에 이동)
+    int ease = 0;
+};
 
 struct Layer {
     QString name;
@@ -40,6 +49,12 @@ struct Layer {
     bool preserveAlpha = false; // 알파 채널 보존: 이미 칠해진 곳에만 칠한다
     QMap<int, QString> instanceNames; // 인스턴스 이름 (키 프레임 -> 이름)
     QMap<int, int> imageMarks;        // 이미지 마크 (키 프레임 -> 마크 색 번호)
+    // ---- 퍼펫 레이어: 키 이미지는 그대로 두고 이동/회전/크기를 키로 애니메이션한다 ----
+    bool puppet = false;
+    int puppetId = 0;                 // 레이어를 옮겨도 변하지 않는 번호 (부모 연결에 사용)
+    int puppetParent = 0;             // 부모 퍼펫 레이어의 puppetId (0 = 없음)
+    qreal pivotX = -1, pivotY = -1;   // 회전·크기 기준점 (그림 좌표, 음수 = 가운데)
+    QMap<int, CameraKey> pkeys; // 프레임 -> 변환 키
 };
 
 struct Folder {
@@ -48,10 +63,22 @@ struct Folder {
     qreal opacity = 1.0;
 };
 
-struct CameraKey {
-    qreal x = 0, y = 0;       // 카메라 중심의 이동량(픽셀)
-    qreal scale = 1.0;        // 1.0 = 100%
-    qreal rotation = 0;       // 도
+// 드로잉 레코더가 기록한 획 하나
+struct StrokeRec {
+    int layer = 0, frame = 0;
+    BrushParams brush;
+    QColor color{Qt::black};
+    bool eraser = false;
+    QVector<QPointF> pts;
+    QVector<float> pressure;
+    QVector<int> ms;      // 획 시작부터의 시간(ms)
+};
+
+// 렌더 카메라: 프로젝트(그리는 캔버스) 크기와 별개로, 최종 렌더(내보내기·퍼블리시·인쇄)의 출력 크기와 맞춤 방식을 정한다.
+struct RenderCamera {
+    bool on = false;
+    QSize size{1920, 1080};
+    int fit = 0;   // 0 비율 유지(남는 곳은 배경색), 1 채우기(넘치는 곳은 잘림), 2 늘이기
 };
 
 class Document : public QObject {
@@ -111,6 +138,8 @@ public:
 
     // ---- 합성 ----
     QImage composite(int frame, bool paper = true, bool useCamera = false) const;
+    // 내보내기용: 배경색(alpha 0 = 투명)과 카메라 적용 여부를 지정해 원본 해상도로 합성한다
+    QImage renderFrame(int frame, const QColor& background, bool useCamera) const;
 
     // ---- 프레임 ----
     void insertFrame(int at);
@@ -131,6 +160,33 @@ public:
     const QMap<int, CameraKey>& cameraKeys() const { return cameraKeys_; }
     QTransform cameraTransform(const CameraKey& k) const;
     QPolygonF cameraFrame(int frame) const;   // 월드 좌표계에서 본 카메라 영역
+
+    // ---- 렌더 카메라 ----
+    const RenderCamera& renderCamera() const { return renderCam_; }
+    void setRenderCamera(const RenderCamera& rc) { renderCam_ = rc; setModified(true); emit changed(); }
+    QSize renderSize() const { return renderCam_.on ? renderCam_.size : size_; }
+
+    // ---- 드로잉 레코더 / 획 애니메이션 ----
+    bool recording() const { return recording_; }
+    void setRecording(bool on) { recording_ = on; emit recorderChanged(); }
+    const QVector<StrokeRec>& strokes() const { return strokes_; }
+    void addStroke(const StrokeRec& s);
+    void clearStrokes(int frame = -1);                  // -1 = 전부
+    int strokeCount(int frame = -1) const;
+    // 기록된 획을 fraction(0~1)만큼 그려 낸 그림. byTime 이면 그린 속도대로, 아니면 획의 길이에 비례해 진행한다.
+    QImage renderStrokes(int frame, double fraction, bool byTime) const;
+    // 기록된 획을 새 레이어의 프레임들로 풀어 쓴다 (획이 그려지는 과정이 애니메이션이 된다). 만든 레이어 번호를 돌려준다 (-1 = 실패).
+    int strokesToFrames(int srcFrame, int startFrame, int nFrames, bool byTime);
+
+    // ---- 퍼펫 레이어 ----
+    void setPuppet(int layer, bool on);
+    CameraKey puppetAt(int layer, int frame) const;          // 키가 없으면 단위 변환
+    QTransform puppetTransform(int layer, int frame) const;  // 부모 연결까지 포함
+    void setPuppetKey(int layer, int frame, const CameraKey& k);
+    void removePuppetKey(int layer, int frame);
+    void setPuppetPivot(int layer, qreal x, qreal y);
+    void setPuppetParent(int layer, int parentLayer);        // -1 = 연결 해제
+    int puppetParentLayer(int layer) const;                  // 부모 레이어 인덱스 (-1 = 없음)
 
     // ---- 북마크 / 이미지 마크 ----
     bool hasBookmark(int frame) const { return bookmarks_.contains(frame); }
@@ -162,7 +218,25 @@ public:
     void removeFromLibrary(int i);
 
     // ---- 사운드 ----
-    QString audioPath() const { return audioPath_; }
+    struct AudioTrack {
+        QString path;
+        QString name;
+        double volume = 1.0;   // 0 ~ 1.5
+        int offsetFrames = 0;  // 타임라인에서 트랙이 시작하는 프레임 (음수 가능)
+        bool muted = false;
+        bool locked = false;
+    };
+    const QVector<AudioTrack>& audioTracks() const { return audioTracks_; }
+    int addAudioTrack(const QString& path, const QString& name = QString());
+    void removeAudioTrack(int i);
+    int duplicateAudioTrack(int i);
+    void moveAudioTrack(int i, int delta);
+    void updateAudioTrack(int i, const AudioTrack& t); // 값만 바꾼다 (재생 갱신은 audioChanged 로)
+    double masterVolume() const { return masterVolume_; }
+    bool masterMuted() const { return masterMuted_; }
+    void setMaster(double volume, bool muted);
+    // 이전 버전 호환: 첫 번째 트랙의 경로 / 트랙 하나로 교체
+    QString audioPath() const { return audioTracks_.isEmpty() ? QString() : audioTracks_[0].path; }
     void setAudioPath(const QString& p);
 
     // ---- 실행 취소 ----
@@ -173,7 +247,16 @@ public:
     // ---- 파일 ----
     bool save(const QString& path);
     bool load(const QString& path);
+    bool saveCopy(const QString& path); // 현재 경로/수정 상태를 바꾸지 않고 사본만 저장
     QString path() const { return path_; }
+    void clearPath() { path_.clear(); } // 템플릿에서 만든 프로젝트는 이름 없음 상태로 시작
+    // 이미지 메뉴용
+    void reverseKeys(int layer, int a, int b);          // [a,b] 구간의 이미지 순서를 뒤집는다
+    void setUniformExposure(int layer, int frames);
+    // 프레임 속도를 바꾸면서 전체 길이(초)는 유지한다: 모든 키/카메라 키/북마크/메모 위치를 비율대로 옮긴다
+    void stretchToFps(int newFps);
+    // [a,b] 구간의 이미지를 times 번 더 반복해 뒤에 이어 붙인다 (pingpong 이면 짝수 번째는 거꾸로). 모자라면 프로젝트 길이를 늘린다.
+    int repeatKeys(int layer, int a, int b, int times, bool pingpong);      // 모든 키 이미지의 노출을 frames 프레임으로 맞춘다
     void setPath(const QString& p) { path_ = p; }
     // 스토리보드 메모 (프레임 -> 텍스트)
     QString note(int frame) const { return notes_.value(frame); }
@@ -190,12 +273,14 @@ public:
     void notifyStructure();
 
 signals:
+    void recorderChanged();
     void changed();
     void structureChanged();
     void currentChanged();
     void modifiedChanged();
     void libraryChanged();
     void cameraChanged();
+    void audioChanged();
 
 private:
     void resetLayersTo(const QString& firstName);
@@ -214,7 +299,9 @@ private:
     QMap<int, CameraKey> cameraKeys_;
     QStringList libNames_;
     QVector<QImage> libImages_;
-    QString audioPath_;
+    QVector<AudioTrack> audioTracks_;
+    double masterVolume_ = 1.0;
+    bool masterMuted_ = false;
     QMap<int, QString> notes_;
     int proxyDiv_ = 1;
     QSet<int> bookmarks_;
@@ -222,6 +309,10 @@ private:
     QVector<MarkColor> markColors_{{QStringLiteral("빨강"), QColor(0xe5, 0x39, 0x35)}};
     bool soloCurrent_ = false;
     QUndoStack* undo_;
+    int nextPuppetId_ = 1;
+    bool recording_ = false;
+    RenderCamera renderCam_;
+    QVector<StrokeRec> strokes_;
     QString path_;
     bool modified_ = false;
 };
