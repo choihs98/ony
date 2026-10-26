@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "MainWindow.h"
 #include "CanvasWidget.h"
 #include "Document.h"

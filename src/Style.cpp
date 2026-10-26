@@ -509,7 +509,9 @@ private:
 
 ButtonMotion* motionOf(const QWidget* w) {
     if (!w) return nullptr;
-    return w->findChild<ButtonMotion*>(QString(), Qt::FindDirectChildrenOnly);
+    for (QObject* c : w->children())
+        if (auto* m = dynamic_cast<ButtonMotion*>(c)) return m;
+    return nullptr;
 }
 
 // 앱 전체 이벤트 필터: 부드러운 휠 스크롤, 대화상자/메뉴 페이드 인

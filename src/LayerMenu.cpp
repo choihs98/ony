@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "LayerMenu.h"
 #include "Blend.h"
 #include "Document.h"

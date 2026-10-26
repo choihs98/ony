@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "Extras.h"
 #include "Document.h"
 #include "Warp.h"
