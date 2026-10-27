@@ -167,6 +167,8 @@ private:
     QListWidget* list_;
     QComboBox* type_;
     QSpinBox* param_;
+    QToolButton* fxColor_ = nullptr;
+    QColor fxColorValue_;
 };
 
 // 카메라: 키 기반 2D 카메라

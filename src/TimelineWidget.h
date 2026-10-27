@@ -48,6 +48,9 @@ private:
     bool compact_ = false;
     int rowToLayer(int row) const;
     int layerToRow(int layer) const;
+    // 프리/포스트 비헤이비어 단추 (which 0 = 첫 이미지 앞, 1 = 마지막 이미지 뒤). 자리가 없으면 빈 사각형.
+    QRect behaviorButton(int row, int which) const;
+    bool behaviorMenuAt(const QPoint& pos);
     void pick(const QPoint& pos, bool pressed);
     const QPixmap& thumb(const QImage& img, QSize box);
 

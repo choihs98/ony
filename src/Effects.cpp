@@ -480,6 +480,332 @@ QImage morph(const QImage& a, const QImage& b, double t) {
     return shiftImage(mid, target - center).convertToFormat(QImage::Format_ARGB32_Premultiplied);
 }
 
+
+// ---------------- 데모6: 넓힌 효과들 ----------------
+bool usesColorParam(Type t) { return t == Type::ColorKeyer || t == Type::ColorRange || t == Type::Glow || t == Type::Halo; }
+
+int packColorParam(const QColor& c, int strength) {
+    return ((std::clamp(strength, 0, 127) & 0x7F) << 24) | (c.rgb() & 0xFFFFFF);
+}
+QColor colorFromParam(int param) { return QColor(QRgb(0xFF000000u | (quint32(param) & 0xFFFFFFu))); }
+int strengthFromParam(int param) { return (param >> 24) & 0x7F; }
+
+// 가운데에서 바깥으로 뻗는 블러 (방사) / 가운데를 도는 블러 (회전)
+static QImage spinOrZoomBlur(const QImage& in, int amount, bool spin) {
+    const QImage src = in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    const int steps = std::clamp(amount, 1, 40);
+    QImage out(src.size(), QImage::Format_ARGB32_Premultiplied);
+    out.fill(Qt::transparent);
+    QPainter p(&out);
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    const QPointF c(src.width() / 2.0, src.height() / 2.0);
+    for (int i = 0; i < steps; ++i) {
+        const double t = double(i) / steps;
+        p.setOpacity(1.0 / (i + 1.0));
+        p.save();
+        p.translate(c);
+        if (spin) p.rotate(t * amount * 0.6);
+        else p.scale(1.0 + t * amount / 120.0, 1.0 + t * amount / 120.0);
+        p.translate(-c);
+        p.drawImage(0, 0, src);
+        p.restore();
+    }
+    return out;
+}
+
+QImage radialBlur(const QImage& in, int amount) { return spinOrZoomBlur(in, amount, false); }
+QImage spinBlur(const QImage& in, int amount) { return spinOrZoomBlur(in, amount, true); }
+
+QImage solarize(const QImage& in, int threshold) {
+    const int th = std::clamp(threshold, 1, 254);
+    return mapStraight(in, [th](QRgb c) {
+        auto f = [th](int v) { return v < th ? v : 255 - v; };
+        return qRgba(f(qRed(c)), f(qGreen(c)), f(qBlue(c)), qAlpha(c));
+    });
+}
+
+// 흑백 변환기: 기준값 위는 흰색, 아래는 검정 (알파는 유지)
+QImage blackWhite(const QImage& in, int threshold) {
+    const int th = std::clamp(threshold, 1, 254);
+    return mapStraight(in, [th](QRgb c) {
+        const int g = (qRed(c) * 299 + qGreen(c) * 587 + qBlue(c) * 114) / 1000;
+        const int v = g >= th ? 255 : 0;
+        return qRgba(v, v, v, qAlpha(c));
+    });
+}
+
+// 고른 색과 비슷한 곳만 남긴다
+QImage colorRange(const QImage& in, int param) {
+    const QColor target = colorFromParam(param);
+    const int tol = std::max(4, strengthFromParam(param) * 2);
+    return mapStraight(in, [&](QRgb c) {
+        const int d = std::abs(qRed(c) - target.red()) + std::abs(qGreen(c) - target.green()) + std::abs(qBlue(c) - target.blue());
+        return d <= tol * 3 ? c : qRgba(qRed(c), qGreen(c), qBlue(c), 0);
+    });
+}
+
+// 고른 색을 지운다 (일반 색 키어)
+QImage colorKeyer(const QImage& in, int param) {
+    const QColor target = colorFromParam(param);
+    const int tol = std::max(4, strengthFromParam(param) * 2);
+    return mapStraight(in, [&](QRgb c) {
+        const int d = std::abs(qRed(c) - target.red()) + std::abs(qGreen(c) - target.green()) + std::abs(qBlue(c) - target.blue());
+        return d <= tol * 3 ? qRgba(qRed(c), qGreen(c), qBlue(c), 0) : c;
+    });
+}
+
+// 밝은 곳은 더 밝게, 어두운 곳은 더 어둡게 (밝기 섞기)
+QImage lumix(const QImage& in, int amount) {
+    const double k = std::clamp(amount, -100, 100) / 100.0;
+    return mapStraight(in, [k](QRgb c) {
+        const double g = (qRed(c) * 0.299 + qGreen(c) * 0.587 + qBlue(c) * 0.114) / 255.0;
+        const double f = 1.0 + k * (g - 0.5) * 2.0;
+        return qRgba(clamp255(int(qRed(c) * f)), clamp255(int(qGreen(c) * f)), clamp255(int(qBlue(c) * f)), qAlpha(c));
+    });
+}
+
+// 렌즈 왜곡 (양수 = 볼록, 음수 = 오목)
+QImage lens(const QImage& in, int amount) {
+    const double cx = in.width() / 2.0, cy = in.height() / 2.0;
+    const double R = std::hypot(cx, cy);
+    const double k = std::clamp(amount, -100, 100) / 200.0;
+    return warpImage(in, [&](double& x, double& y) {
+        const double dx = (x - cx) / R, dy = (y - cy) / R;
+        const double r2 = dx * dx + dy * dy;
+        const double f = 1.0 + k * r2;
+        x = cx + dx * R * f;
+        y = cy + dy * R * f;
+    });
+}
+
+// 돌을 던진 물결 (가운데에서 퍼지는 동심원)
+QImage ripple(const QImage& in, int amount) {
+    const double cx = in.width() / 2.0, cy = in.height() / 2.0;
+    const double amp = std::clamp(amount, 1, 60);
+    return warpImage(in, [&](double& x, double& y) {
+        const double dx = x - cx, dy = y - cy;
+        const double d = std::hypot(dx, dy);
+        if (d < 1e-6) return;
+        const double off = amp * std::sin(d / 12.0);
+        x += dx / d * off;
+        y += dy / d * off;
+    });
+}
+
+// 밝은 곳이 번지는 빛 (글로우)
+QImage glow(const QImage& in, int param) {
+    const QColor col = colorFromParam(param);
+    const int r = std::max(2, strengthFromParam(param));
+    const QImage src = in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    // 밝은 곳만 뽑는다
+    QImage bright = mapStraight(src, [](QRgb c) {
+        const int g = (qRed(c) * 299 + qGreen(c) * 587 + qBlue(c) * 114) / 1000;
+        const int a = g > 150 ? qAlpha(c) : 0;
+        return qRgba(qRed(c), qGreen(c), qBlue(c), a);
+    });
+    bright = gaussBlur(bright, r * 2);
+    QImage tint(bright.size(), QImage::Format_ARGB32_Premultiplied);
+    tint.fill(Qt::transparent);
+    {
+        QPainter tp(&tint);
+        tp.drawImage(0, 0, bright);
+        tp.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        tp.fillRect(tint.rect(), col);
+    }
+    QImage out = src;
+    QPainter p(&out);
+    p.setCompositionMode(QPainter::CompositionMode_Plus);
+    p.drawImage(0, 0, tint);
+    return out;
+}
+
+// 전체가 뽀얗게 번진다 (블룸)
+QImage bloom(const QImage& in, int amount) {
+    const QImage src = in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    const QImage soft = gaussBlur(src, std::clamp(amount, 1, 40));
+    QImage out = src;
+    QPainter p(&out);
+    p.setOpacity(std::clamp(amount, 1, 100) / 130.0);
+    p.setCompositionMode(QPainter::CompositionMode_Plus);
+    p.drawImage(0, 0, soft);
+    return out;
+}
+
+// 그림 뒤에서 비치는 빛무리 (헤일로)
+QImage halo(const QImage& in, int param) {
+    const QColor col = colorFromParam(param);
+    const int r = std::max(4, strengthFromParam(param) * 2);
+    const QImage src = in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    QImage mask = alphaOnly(src, col.rgb() | 0xFF000000u);
+    mask = gaussBlur(mask, r);
+    QImage out(src.size(), QImage::Format_ARGB32_Premultiplied);
+    out.fill(Qt::transparent);
+    QPainter p(&out);
+    p.drawImage(0, 0, mask);
+    p.drawImage(0, 0, src);
+    return out;
+}
+
+// 툰 셰이딩: 밝기를 몇 단계로 뭉갠다 (셀 애니메이션 느낌)
+QImage toonShading(const QImage& in, int levels) {
+    const int n = std::clamp(levels, 2, 8);
+    return mapStraight(in, [n](QRgb c) {
+        double h, s, l;
+        rgb2hsl(qRed(c), qGreen(c), qBlue(c), h, s, l);
+        l = std::round(l * (n - 1)) / (n - 1);
+        return hsl2rgb(h, s, l, qAlpha(c));
+    });
+}
+
+// 알파 가장자리를 깎거나(음수) 부풀린다(양수)
+static QImage erodeDilate(const QImage& in, int px, bool grow) {
+    const int r = std::clamp(px, 1, 40);
+    const QImage src = in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    QImage out(src.size(), QImage::Format_ARGB32_Premultiplied);
+    out.fill(Qt::transparent);
+    if (grow) {
+        QPainter p(&out);
+        const int steps = std::clamp(r * 2, 8, 48);
+        for (int i = 0; i < steps; ++i) {
+            const double a = i * 2 * M_PI / steps;
+            p.drawImage(QPointF(std::cos(a) * r, std::sin(a) * r), src);
+        }
+        p.drawImage(0, 0, src);
+        return out;
+    }
+    // 깎기: 바깥을 부풀린 뒤 그만큼 빼낸다
+    QImage inv(src.size(), QImage::Format_ARGB32_Premultiplied);
+    inv.fill(Qt::white);
+    {
+        QPainter ip(&inv);
+        ip.setCompositionMode(QPainter::CompositionMode_DestinationOut);
+        ip.drawImage(0, 0, src);
+    }
+    QImage fat(src.size(), QImage::Format_ARGB32_Premultiplied);
+    fat.fill(Qt::transparent);
+    {
+        QPainter fp(&fat);
+        const int steps = std::clamp(r * 2, 8, 48);
+        for (int i = 0; i < steps; ++i) {
+            const double a = i * 2 * M_PI / steps;
+            fp.drawImage(QPointF(std::cos(a) * r, std::sin(a) * r), inv);
+        }
+        fp.drawImage(0, 0, inv);
+    }
+    out = src;
+    QPainter p(&out);
+    p.setCompositionMode(QPainter::CompositionMode_DestinationOut);
+    p.drawImage(0, 0, fat);
+    return out;
+}
+
+QImage erode(const QImage& in, int px) { return erodeDilate(in, px, false); }
+QImage dilate(const QImage& in, int px) { return erodeDilate(in, px, true); }
+
+// 가장자리에 입체감 (베벨)
+QImage bevel(const QImage& in, int depth) {
+    const int d = std::clamp(depth, 1, 20);
+    const QImage src = in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    const QImage lightMask = erodeDilate(src, d, false);   // 안쪽
+    QImage out = src;
+    QPainter p(&out);
+    p.setCompositionMode(QPainter::CompositionMode_SourceAtop);
+    p.setOpacity(0.45);
+    p.drawImage(QPointF(-d * 0.6, -d * 0.6), alphaOnly(lightMask, qRgba(255, 255, 255, 255)));
+    p.setOpacity(0.35);
+    p.drawImage(QPointF(d * 0.6, d * 0.6), alphaOnly(lightMask, qRgba(0, 0, 0, 255)));
+    return out;
+}
+
+// 하프톤: 밝기에 따라 점 크기가 달라지는 인쇄 느낌
+QImage halftone(const QImage& in, int cell) {
+    const int n = std::clamp(cell, 2, 40);
+    const QImage src = in.convertToFormat(QImage::Format_ARGB32);
+    QImage out(src.size(), QImage::Format_ARGB32_Premultiplied);
+    out.fill(Qt::transparent);
+    QPainter p(&out);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setPen(Qt::NoPen);
+    for (int y = 0; y < src.height(); y += n) {
+        for (int x = 0; x < src.width(); x += n) {
+            long sr = 0, sg = 0, sb = 0, sa = 0, cnt = 0;
+            for (int j = 0; j < n && y + j < src.height(); ++j) {
+                const QRgb* row = reinterpret_cast<const QRgb*>(src.constScanLine(y + j));
+                for (int i = 0; i < n && x + i < src.width(); ++i) {
+                    sr += qRed(row[x + i]);
+                    sg += qGreen(row[x + i]);
+                    sb += qBlue(row[x + i]);
+                    sa += qAlpha(row[x + i]);
+                    ++cnt;
+                }
+            }
+            if (!cnt || sa == 0) continue;
+            const double lum = (sr * 0.299 + sg * 0.587 + sb * 0.114) / cnt / 255.0;
+            const double r = n * 0.72 * (1.0 - lum);
+            if (r < 0.3) continue;
+            p.setBrush(QColor(int(sr / cnt), int(sg / cnt), int(sb / cnt), int(sa / cnt)));
+            p.drawEllipse(QPointF(x + n / 2.0, y + n / 2.0), r, r);
+        }
+    }
+    return out;
+}
+
+// 디더(인쇄): 베이어 행렬로 두 단계만 남긴다
+QImage dither(const QImage& in, int) {
+    static const int kBayer[8][8] = {{0, 32, 8, 40, 2, 34, 10, 42},   {48, 16, 56, 24, 50, 18, 58, 26},
+                                     {12, 44, 4, 36, 14, 46, 6, 38},  {60, 28, 52, 20, 62, 30, 54, 22},
+                                     {3, 35, 11, 43, 1, 33, 9, 41},   {51, 19, 59, 27, 49, 17, 57, 25},
+                                     {15, 47, 7, 39, 13, 45, 5, 37},  {63, 31, 55, 23, 61, 29, 53, 21}};
+    const QImage src = in.convertToFormat(QImage::Format_ARGB32);
+    QImage out = src;
+    for (int y = 0; y < out.height(); ++y) {
+        QRgb* d = reinterpret_cast<QRgb*>(out.scanLine(y));
+        for (int x = 0; x < out.width(); ++x) {
+            const int g = (qRed(d[x]) * 299 + qGreen(d[x]) * 587 + qBlue(d[x]) * 114) / 1000;
+            const int th = kBayer[y % 8][x % 8] * 4 + 2;
+            const int v = g > th ? 255 : 0;
+            d[x] = qRgba(v, v, v, qAlpha(d[x]));
+        }
+    }
+    return out.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+}
+
+// 계단진 가장자리를 부드럽게
+QImage antiAlias(const QImage& in, int amount) {
+    const QImage src = in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    const QImage soft = boxBlur(src, std::clamp(amount, 1, 4));
+    QImage out = src;
+    QPainter p(&out);
+    p.setOpacity(std::clamp(amount, 1, 10) / 10.0);
+    p.drawImage(0, 0, soft);
+    return out;
+}
+
+// 페인트 범주: 그림을 한 방향으로 여러 번 겹쳐 선을 반복한다
+QImage repeatLine(const QImage& in, int step) {
+    const int d = std::clamp(step, 2, 120);
+    const QImage src = in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    QImage out(src.size(), QImage::Format_ARGB32_Premultiplied);
+    out.fill(Qt::transparent);
+    QPainter p(&out);
+    const int n = std::max(1, src.width() / d);
+    for (int i = n; i >= 0; --i) {
+        p.setOpacity(std::clamp(1.0 - double(i) / (n + 1), 0.08, 1.0));
+        p.drawImage(i * d, 0, src);
+    }
+    return out;
+}
+
+// 페인트 범주: 선을 점선처럼 끊는다
+QImage dashes(const QImage& in, int period) {
+    const int n = std::clamp(period, 2, 120);
+    QImage out = in.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    QPainter p(&out);
+    p.setCompositionMode(QPainter::CompositionMode_DestinationOut);
+    for (int x = 0; x < out.width(); x += n * 2) p.fillRect(x, 0, n, out.height(), Qt::black);
+    return out;
+}
+
 QImage crossfade(const QImage& a, const QImage& b, double t) {
     QImage o(a.size(), QImage::Format_ARGB32_Premultiplied);
     o.fill(Qt::transparent);
@@ -541,13 +867,37 @@ ParamInfo paramInfo(Type t) {
     case Type::Sharpen: return {true, 10, 300, 100, QStringLiteral("세기")};
     case Type::Curves: return {true, -100, 100, 40, QStringLiteral("S 곡선 세기")};
     case Type::Levels: return {true, 0, 100, 30, QStringLiteral("대비 올리기")};
+    case Type::RadialBlur: return {true, 1, 40, 10, QStringLiteral("세기")};
+    case Type::SpinBlur: return {true, 1, 40, 10, QStringLiteral("세기")};
+    case Type::Solarize: return {true, 1, 254, 128, QStringLiteral("기준값")};
+    case Type::BlackWhite: return {true, 1, 254, 128, QStringLiteral("기준값")};
+    case Type::Lumix: return {true, -100, 100, 50, QStringLiteral("세기")};
+    case Type::Lens: return {true, -100, 100, 40, QStringLiteral("세기 (음수=오목)")};
+    case Type::Ripple: return {true, 1, 60, 12, QStringLiteral("물결 높이")};
+    case Type::Bloom: return {true, 1, 40, 12, QStringLiteral("세기")};
+    case Type::ToonShading: return {true, 2, 8, 4, QStringLiteral("단계")};
+    case Type::Bevel: return {true, 1, 20, 4, QStringLiteral("깊이")};
+    case Type::Erode: return {true, 1, 40, 3, QStringLiteral("깎을 픽셀")};
+    case Type::Dilate: return {true, 1, 40, 3, QStringLiteral("부풀릴 픽셀")};
+    case Type::Halftone: return {true, 2, 40, 6, QStringLiteral("점 간격")};
+    case Type::AntiAlias: return {true, 1, 4, 1, QStringLiteral("세기")};
+    case Type::RepeatLine: return {true, 2, 120, 24, QStringLiteral("간격")};
+    case Type::Dashes: return {true, 2, 120, 10, QStringLiteral("주기")};
+    // 색을 고르는 효과: param 에 색과 세기가 함께 들어간다
+    case Type::ColorRange: case Type::ColorKeyer: return {true, 0, 127, 24, QStringLiteral("허용 오차")};
+    case Type::Glow: case Type::Halo: return {true, 1, 60, 10, QStringLiteral("번지는 폭")};
     default: return {};
     }
 }
 
 QString categoryOf(Type t) {
     switch (t) {
-    case Type::Blur: case Type::GaussBlur: return QStringLiteral("블러");
+    case Type::Blur: case Type::GaussBlur: case Type::RadialBlur: case Type::SpinBlur: return QStringLiteral("블러");
+    case Type::Solarize: case Type::BlackWhite: case Type::ColorRange: case Type::Lumix: return QStringLiteral("색");
+    case Type::Lens: case Type::Ripple: return QStringLiteral("왜곡");
+    case Type::ColorKeyer: return QStringLiteral("키잉");
+    case Type::Glow: case Type::Bloom: case Type::Halo: return QStringLiteral("렌더링");
+    case Type::RepeatLine: case Type::Dashes: return QStringLiteral("페인트");
     case Type::Invert: case Type::Grayscale: case Type::Brightness: case Type::Contrast: case Type::Saturation:
     case Type::HueShift: case Type::Sepia: case Type::Posterize: case Type::Threshold: return QStringLiteral("색");
     case Type::Wave: case Type::Swirl: case Type::Bulge: return QStringLiteral("왜곡");
@@ -561,7 +911,7 @@ QString categoryOf(Type t) {
 
 QStringList categories() {
     return {QStringLiteral("블러"), QStringLiteral("색"), QStringLiteral("왜곡"), QStringLiteral("키잉"),
-            QStringLiteral("모션"), QStringLiteral("렌더링"), QStringLiteral("스타일화")};
+            QStringLiteral("모션"), QStringLiteral("페인트"), QStringLiteral("렌더링"), QStringLiteral("스타일화")};
 }
 
 QVector<Type> typesIn(const QString& category) {
@@ -643,6 +993,27 @@ QImage apply(const QImage& in, const Item& item) {
         const int d = std::clamp(item.param, 0, 100) * 60 / 100;
         return levels(in, d, 255 - d, 1.0, 0, 255);
     }
+    case Type::RadialBlur: return radialBlur(in, item.param);
+    case Type::SpinBlur: return spinBlur(in, item.param);
+    case Type::Solarize: return solarize(in, item.param);
+    case Type::BlackWhite: return blackWhite(in, item.param);
+    case Type::ColorRange: return colorRange(in, item.param);
+    case Type::Lumix: return lumix(in, item.param);
+    case Type::Lens: return lens(in, item.param);
+    case Type::Ripple: return ripple(in, item.param);
+    case Type::ColorKeyer: return colorKeyer(in, item.param);
+    case Type::Glow: return glow(in, item.param);
+    case Type::Bloom: return bloom(in, item.param);
+    case Type::Halo: return halo(in, item.param);
+    case Type::ToonShading: return toonShading(in, item.param);
+    case Type::Bevel: return bevel(in, item.param);
+    case Type::Erode: return erode(in, item.param);
+    case Type::Dilate: return dilate(in, item.param);
+    case Type::Halftone: return halftone(in, item.param);
+    case Type::Dither: return dither(in, item.param);
+    case Type::AntiAlias: return antiAlias(in, item.param);
+    case Type::RepeatLine: return repeatLine(in, item.param);
+    case Type::Dashes: return dashes(in, item.param);
     }
     return in;
 }
@@ -679,6 +1050,27 @@ QString typeName(Type t) {
     case Type::Sharpen: return QStringLiteral("선명하게");
     case Type::Curves: return QStringLiteral("커브 (S 곡선)");
     case Type::Levels: return QStringLiteral("레벨 (대비)");
+    case Type::RadialBlur: return QStringLiteral("방사 블러");
+    case Type::SpinBlur: return QStringLiteral("회전 블러");
+    case Type::Solarize: return QStringLiteral("솔라리제이션");
+    case Type::BlackWhite: return QStringLiteral("흑백 변환기");
+    case Type::ColorRange: return QStringLiteral("색 범위만 남기기");
+    case Type::Lumix: return QStringLiteral("밝기 대비 섞기");
+    case Type::Lens: return QStringLiteral("렌즈 왜곡");
+    case Type::Ripple: return QStringLiteral("물결 (동심원)");
+    case Type::ColorKeyer: return QStringLiteral("색 지정 제거");
+    case Type::Glow: return QStringLiteral("글로우 (밝은 곳 번짐)");
+    case Type::Bloom: return QStringLiteral("블룸");
+    case Type::Halo: return QStringLiteral("헤일로 (빛무리)");
+    case Type::ToonShading: return QStringLiteral("툰 셰이딩");
+    case Type::Bevel: return QStringLiteral("베벨 (입체 가장자리)");
+    case Type::Erode: return QStringLiteral("깎기");
+    case Type::Dilate: return QStringLiteral("부풀리기");
+    case Type::Halftone: return QStringLiteral("하프톤 (인쇄 점)");
+    case Type::Dither: return QStringLiteral("디더 (흑백 인쇄)");
+    case Type::AntiAlias: return QStringLiteral("가장자리 다듬기");
+    case Type::RepeatLine: return QStringLiteral("선 반복");
+    case Type::Dashes: return QStringLiteral("점선으로 끊기");
     }
     return QString();
 }

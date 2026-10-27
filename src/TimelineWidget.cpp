@@ -81,6 +81,60 @@ const QPixmap& TimelineWidget::thumb(const QImage& img, QSize box) {
     return thumbs_.insert(key, QPixmap::fromImage(t)).value();
 }
 
+// 비헤이비어 네 가지를 작은 그림으로 그린다: 없음 / 루프 / 핑퐁 / 유지
+static void drawBehaviorGlyph(QPainter& p, const QRect& r, int mode, const QColor& c) {
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setPen(QPen(c, 1.4));
+    p.setBrush(Qt::NoBrush);
+    const QPointF ctr = r.center();
+    const double w = r.width() * 0.34, h = r.height() * 0.28;
+    switch (mode) {
+    case 1: { // 루프: 둥근 화살표
+        QRectF a(ctr.x() - w, ctr.y() - w, w * 2, w * 2);
+        p.drawArc(a, 40 * 16, 290 * 16);
+        const QPointF t(ctr.x() + w * 0.72, ctr.y() - w * 0.72);
+        p.drawLine(t, t + QPointF(-w * 0.1, -w * 0.75));
+        p.drawLine(t, t + QPointF(w * 0.75, -w * 0.1));
+        break;
+    }
+    case 2: { // 핑퐁: 양쪽 화살표
+        p.drawLine(QPointF(ctr.x() - w, ctr.y()), QPointF(ctr.x() + w, ctr.y()));
+        p.drawLine(QPointF(ctr.x() - w, ctr.y()), QPointF(ctr.x() - w + h, ctr.y() - h));
+        p.drawLine(QPointF(ctr.x() - w, ctr.y()), QPointF(ctr.x() - w + h, ctr.y() + h));
+        p.drawLine(QPointF(ctr.x() + w, ctr.y()), QPointF(ctr.x() + w - h, ctr.y() - h));
+        p.drawLine(QPointF(ctr.x() + w, ctr.y()), QPointF(ctr.x() + w - h, ctr.y() + h));
+        break;
+    }
+    case 3: { // 유지: 세로 막대 + 오른쪽 화살표
+        p.drawLine(QPointF(ctr.x() - w, ctr.y() - h * 1.5), QPointF(ctr.x() - w, ctr.y() + h * 1.5));
+        p.drawLine(QPointF(ctr.x() - w * 0.55, ctr.y()), QPointF(ctr.x() + w, ctr.y()));
+        p.drawLine(QPointF(ctr.x() + w, ctr.y()), QPointF(ctr.x() + w - h, ctr.y() - h));
+        p.drawLine(QPointF(ctr.x() + w, ctr.y()), QPointF(ctr.x() + w - h, ctr.y() + h));
+        break;
+    }
+    default: { // 없음: 점선
+        p.drawLine(QPointF(ctr.x() - w, ctr.y()), QPointF(ctr.x() - w * 0.35, ctr.y()));
+        p.drawLine(QPointF(ctr.x() + w * 0.35, ctr.y()), QPointF(ctr.x() + w, ctr.y()));
+        break;
+    }
+    }
+    p.restore();
+}
+
+QRect TimelineWidget::behaviorButton(int row, int which) const {
+    if (row < 0 || row >= doc_->layerCount()) return QRect();
+    const int l = rowToLayer(row);
+    const int first = doc_->firstKey(l);
+    if (first < 0) return QRect();
+    const int f = (which == 0) ? first - 1 : doc_->contentEnd(l);
+    if (f < 0 || f >= doc_->frameCount()) return QRect();
+    const int side = std::min(18, std::min(cellW_ - 2, rowH_ - 4));
+    if (side < 8) return QRect();
+    const int y = kHeader + row * rowH_;
+    return QRect(kNameW + f * cellW_ + (cellW_ - side) / 2, y + (rowH_ - side) / 2, side, side);
+}
+
 void TimelineWidget::paintEvent(QPaintEvent* ev) {
     QPainter p(this);
     const QPalette pal = palette();
@@ -166,9 +220,22 @@ void TimelineWidget::paintEvent(QPaintEvent* ev) {
 
         // ---- 프레임 칸
         int key = doc_->keyIndexAt(l, f0);
+        const int cFirst = doc_->firstKey(l);
+        const int cEnd = doc_->contentEnd(l);
         for (int f = f0; f <= f1; ++f) {
             if (!L.frames[f].isNull()) key = f;
             const QRect c(kNameW + f * cellW_, y, cellW_, rowH_);
+            // 레이어 내용 밖: 비헤이비어가 채우는 구간만 옅은 띠로 보여 준다
+            if (cFirst >= 0 && (f < cFirst || f >= cEnd)) {
+                const int mode = f < cFirst ? L.preBehavior : L.postBehavior;
+                if (mode != 0) {
+                    const QRect tb = c.adjusted(0, 4, 0, -4);
+                    p.fillRect(tb, dark ? QColor(0x40, 0x44, 0x46, 110) : QColor(0xb8, 0xbc, 0xc2, 110));
+                }
+                p.setPen(grid);
+                p.drawLine(c.right(), y, c.right(), y + rowH_);
+                continue;
+            }
             if (key >= 0) {
                 if (key == f) {
                     const QRect tb = c.adjusted(2, 4, -2, -4);
@@ -195,6 +262,17 @@ void TimelineWidget::paintEvent(QPaintEvent* ev) {
             }
             p.setPen(grid);
             p.drawLine(c.right(), y, c.right(), y + rowH_);
+        }
+        // ---- 프리/포스트 비헤이비어 단추 (TVPaint 처럼 내용의 앞뒤 칸에)
+        for (int which = 0; which < 2; ++which) {
+            const QRect br = behaviorButton(row, which);
+            if (br.isNull() || br.right() < clip.left() - 4 || br.left() > clip.right() + 4) continue;
+            const int mode = which == 0 ? L.preBehavior : L.postBehavior;
+            p.setPen(QPen(grid, 1));
+            p.setBrush(dark ? bg.lighter(128) : bg.darker(108));
+            p.drawRoundedRect(br, 3, 3);
+            p.setBrush(Qt::NoBrush);
+            drawBehaviorGlyph(p, br, mode, mode == 0 ? muted : text);
         }
         p.setPen(grid);
         p.drawLine(0, y + rowH_, width(), y + rowH_);
@@ -239,6 +317,40 @@ void TimelineWidget::paintEvent(QPaintEvent* ev) {
     p.drawLine(kNameW, 0, kNameW, height());
 }
 
+bool TimelineWidget::behaviorMenuAt(const QPoint& pos) {
+    if (pos.y() < kHeader) return false;
+    const int row = (pos.y() - kHeader) / rowH_;
+    if (row < 0 || row >= doc_->layerCount()) return false;
+    for (int which = 0; which < 2; ++which) {
+        const QRect br = behaviorButton(row, which);
+        if (br.isNull() || !br.contains(pos)) continue;
+        const int l = rowToLayer(row);
+        doc_->setCurrentLayer(l);
+        static const char* names[] = {"없음", "루프", "핑퐁", "유지"};
+        QMenu m(this);
+        m.setTitle(which == 0 ? QStringLiteral("첫 이미지 앞") : QStringLiteral("마지막 이미지 뒤"));
+        QAction* hdr = m.addAction(m.title());
+        hdr->setEnabled(false);
+        m.addSeparator();
+        const int cur = which == 0 ? doc_->layer(l).preBehavior : doc_->layer(l).postBehavior;
+        QVector<QAction*> acts;
+        for (int i = 0; i < 4; ++i) {
+            QAction* a = m.addAction(QString::fromUtf8(names[i]));
+            a->setCheckable(true);
+            a->setChecked(i == cur);
+            acts.push_back(a);
+        }
+        QAction* chosen = m.exec(mapToGlobal(pos));
+        const int idx = acts.indexOf(chosen);
+        if (idx >= 0 && idx != cur) {
+            (which == 0 ? doc_->layer(l).preBehavior : doc_->layer(l).postBehavior) = idx;
+            doc_->notifyStructure();
+        }
+        return true;
+    }
+    return false;
+}
+
 void TimelineWidget::pick(const QPoint& pos, bool pressed) {
     const int frames = doc_->frameCount();
     if (pos.x() >= kNameW) {
@@ -280,6 +392,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* e) {
         update();
         return;
     }
+    if (behaviorMenuAt(e->pos())) return;
     pick(e->pos(), true);
 }
 

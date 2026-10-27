@@ -1,6 +1,7 @@
 #pragma once
 #include <functional>
 #include "Document.h"
+#include "Warp.h"
 #include <QDialog>
 #include <QImage>
 #include <QListWidget>
@@ -112,6 +113,38 @@ private:
 bool editCustomPanel(QWidget* parent, CustomPanelDef* def);
 QVector<CustomPanelDef> loadCustomPanels();
 void saveCustomPanels(const QVector<CustomPanelDef>& defs);
+
+// 뼈대(본) 변형 대화상자: 뼈를 놓고 끝점을 끌어 그림을 휘게 한다
+class BoneWarpDialog : public QDialog {
+    Q_OBJECT
+public:
+    BoneWarpDialog(const QImage& img, QWidget* parent = nullptr);
+    QImage result() const;
+    QVector<Warp::Bone> bones() const { return bones_; }
+    void setBones(const QVector<Warp::Bone>& b) { bones_ = b; preview_ = QImage(); update(); }
+protected:
+    void paintEvent(QPaintEvent*) override;
+    void mousePressEvent(QMouseEvent*) override;
+    void mouseMoveEvent(QMouseEvent*) override;
+    void mouseReleaseEvent(QMouseEvent*) override;
+private:
+    QRectF imageRect() const;
+    QPointF toImage(const QPointF& w) const;
+    QPointF toWidget(const QPointF& i) const;
+    int pickHandle(const QPointF& widgetPos, bool* isEnd) const;
+    QImage img_;
+    QVector<Warp::Bone> bones_;
+    int drag_ = -1;
+    bool dragEnd_ = false;
+    bool placing_ = false;
+    QPointF newStart_;
+    QPointF hover_;
+    double radius_ = 60;
+    bool showOriginal_ = false;
+    bool followNearest_ = true;
+    QImage preview_;
+    class QSpinBox* radiusBox_ = nullptr;
+};
 
 // 스토리보드 패널: 이미지가 바뀌는 프레임마다 썸네일 + 메모
 class StoryboardPanel : public QWidget {

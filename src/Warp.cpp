@@ -183,4 +183,130 @@ QImage meshWarp(const QImage& src, int cols, int rows, const QVector<QPointF>& d
     return out;
 }
 
+
+// ---------------------------------------------------------------- 뼈대(본) 변형
+namespace {
+// 점에서 선분까지의 거리
+double segDistance(const QPointF& p, const QPointF& a, const QPointF& b) {
+    const QPointF ab = b - a;
+    const double len2 = ab.x() * ab.x() + ab.y() * ab.y();
+    if (len2 < 1e-9) return std::hypot(p.x() - a.x(), p.y() - a.y());
+    double t = ((p.x() - a.x()) * ab.x() + (p.y() - a.y()) * ab.y()) / len2;
+    t = std::clamp(t, 0.0, 1.0);
+    const QPointF c = a + ab * t;
+    return std::hypot(p.x() - c.x(), p.y() - c.y());
+}
+
+// (a,b) 를 (da,db) 로 옮기는 닮음 변환 (회전 + 크기 + 이동)
+QTransform similarity(const QPointF& a, const QPointF& b, const QPointF& da, const QPointF& db) {
+    const QPointF u = b - a, v = db - da;
+    const double lu = std::hypot(u.x(), u.y()), lv = std::hypot(v.x(), v.y());
+    if (lu < 1e-6) return QTransform::fromTranslate(da.x() - a.x(), da.y() - a.y());
+    const double s = lv < 1e-6 ? 1.0 : lv / lu;
+    const double ang = std::atan2(v.y(), v.x()) - std::atan2(u.y(), u.x());
+    const double cs = std::cos(ang) * s, sn = std::sin(ang) * s;
+    // p' = R*S*(p - a) + da
+    QTransform t(cs, sn, -sn, cs, 0, 0);
+    const QPointF moved = t.map(QPointF(0, 0));
+    Q_UNUSED(moved);
+    QTransform full;
+    full.translate(da.x(), da.y());
+    full = QTransform(cs, sn, -sn, cs, da.x(), da.y());
+    // (p - a) 를 먼저 빼야 하므로 앞에 평행이동을 붙인다
+    QTransform pre;
+    pre.translate(-a.x(), -a.y());
+    return pre * full;
+}
+
+// 가중치: 뼈에서 멀어질수록 0 에 가까워진다
+double boneWeight(double dist, double radius) {
+    if (radius <= 1e-6) return 0.0;
+    const double t = std::clamp(dist / radius, 0.0, 1.0);
+    const double w = 1.0 - t;
+    return w * w * w;   // 가까운 곳이 세게 끌린다
+}
+} // namespace
+
+QPointF boneMapPoint(const QVector<Bone>& bones, const QPointF& p, bool followNearest) {
+    double sum = 0;
+    QPointF acc(0, 0);
+    int nearest = -1;
+    double nearestD = 1e18;
+    for (int i = 0; i < bones.size(); ++i) {
+        const Bone& bn = bones[i];
+        const double d = segDistance(p, bn.a, bn.b);
+        if (d < nearestD) {
+            nearestD = d;
+            nearest = i;
+        }
+        const double w = boneWeight(d, bn.radius);
+        if (w <= 1e-6) continue;
+        acc += similarity(bn.a, bn.b, bn.da, bn.db).map(p) * w;
+        sum += w;
+    }
+    if (sum > 1e-6) return acc / sum;
+    if (followNearest && nearest >= 0)
+        return similarity(bones[nearest].a, bones[nearest].b, bones[nearest].da, bones[nearest].db).map(p);
+    return p;
+}
+
+QImage boneWarp(const QImage& src, const QVector<Bone>& bones, bool followNearest) {
+    if (bones.isEmpty()) return src;
+    const QImage s = src.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    QImage out(s.size(), QImage::Format_ARGB32_Premultiplied);
+    out.fill(Qt::transparent);
+    // 역방향 매핑: 결과 픽셀마다 원본 어디에서 왔는지 찾는다.
+    // 가중치는 "옮긴 뒤의 뼈" 기준으로 재고, 변환은 거꾸로 적용한다.
+    QVector<QTransform> inv(bones.size());
+    for (int i = 0; i < bones.size(); ++i) {
+        bool ok = false;
+        inv[i] = similarity(bones[i].a, bones[i].b, bones[i].da, bones[i].db).inverted(&ok);
+        if (!ok) inv[i] = QTransform();
+    }
+    const int w = s.width(), h = s.height();
+    for (int y = 0; y < h; ++y) {
+        QRgb* d = reinterpret_cast<QRgb*>(out.scanLine(y));
+        for (int x = 0; x < w; ++x) {
+            const QPointF q(x, y);
+            double sum = 0;
+            QPointF acc(0, 0);
+            int nearest = -1;
+            double nearestD = 1e18;
+            for (int i = 0; i < bones.size(); ++i) {
+                const double dd = segDistance(q, bones[i].da, bones[i].db);
+                if (dd < nearestD) {
+                    nearestD = dd;
+                    nearest = i;
+                }
+                const double wt = boneWeight(dd, bones[i].radius);
+                if (wt <= 1e-6) continue;
+                acc += inv[i].map(q) * wt;
+                sum += wt;
+            }
+            QPointF sp = q;
+            if (sum > 1e-6) sp = acc / sum;
+            else if (followNearest && nearest >= 0) sp = inv[nearest].map(q);
+            // 쌍선형 샘플링
+            const double fx = sp.x(), fy = sp.y();
+            if (fx < 0 || fy < 0 || fx > w - 1 || fy > h - 1) {
+                d[x] = 0;
+                continue;
+            }
+            const int x0 = int(fx), y0 = int(fy);
+            const int x1 = std::min(x0 + 1, w - 1), y1 = std::min(y0 + 1, h - 1);
+            const double ux = fx - x0, uy = fy - y0;
+            const QRgb* r0 = reinterpret_cast<const QRgb*>(s.constScanLine(y0));
+            const QRgb* r1 = reinterpret_cast<const QRgb*>(s.constScanLine(y1));
+            auto mix = [&](int shift) {
+                const double a = (r0[x0] >> shift & 255) * (1 - ux) + (r0[x1] >> shift & 255) * ux;
+                const double b = (r1[x0] >> shift & 255) * (1 - ux) + (r1[x1] >> shift & 255) * ux;
+                return int(a * (1 - uy) + b * uy + 0.5);
+            };
+            d[x] = qRgba(mix(16), mix(8), mix(0), mix(24));
+        }
+    }
+    return out;
+}
+
+
 }

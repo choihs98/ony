@@ -1,5 +1,6 @@
 #include <functional>
 #include "Document.h"
+#include <QDir>
 #include <QFileInfo>
 #include "Blend.h"
 
@@ -123,6 +124,8 @@ QImage Document::keyImage(int layer, int key) const {
 QImage* Document::editableImage(int layer, int frame) {
     if (layer < 0 || layer >= layers_.size()) return nullptr;
     int k = keyIndexAt(layer, frame);
+    // 레이어 내용 범위 밖(마지막 이미지 뒤)에 그리면, 유지되던 이미지를 고치지 않고 그 자리에 새 이미지를 만든다.
+    if (k >= 0 && newImagePastEnd_ && frame >= contentEnd(layer)) k = -1;
     if (k < 0) {
         k = frame;
         QImage img(size_, QImage::Format_ARGB32_Premultiplied);
@@ -177,12 +180,22 @@ int Document::lastKey(int layer) const {
     return -1;
 }
 
+int Document::contentEnd(int l) const {
+    if (l < 0 || l >= layers_.size()) return 0;
+    const int first = firstKey(l);
+    if (first < 0) return 0;
+    const Layer& L = layers_[l];
+    // 레이어 끝을 직접 정했으면 그걸 쓰고, 아니면 마지막 이미지 바로 뒤가 내용의 끝이다.
+    if (L.endFrame >= 0) return std::clamp(L.endFrame, first + 1, frameCount_);
+    return std::clamp(lastKey(l) + 1, first + 1, frameCount_);
+}
+
 int Document::resolveKey(int l, int f) const {
     if (l < 0 || l >= layers_.size() || f < 0 || f >= frameCount_) return -1;
     const Layer& L = layers_[l];
     const int first = firstKey(l);
     if (first < 0) return -1;
-    const int end = (L.endFrame >= 0) ? std::clamp(L.endFrame, first + 1, frameCount_) : frameCount_;
+    const int end = contentEnd(l);
     if (f >= first && f < end) return keyIndexAt(l, f);
     const int len = end - first;
     const int mode = f < first ? L.preBehavior : L.postBehavior;
@@ -1713,6 +1726,7 @@ bool Document::load(const QString& path) {
     curLayer_ = 0;
     curFrame_ = 0;
     path_ = path;
+    relinkMissingAudio();
     undo_->clear();
     modified_ = false;
     emit structureChanged();
@@ -1835,6 +1849,79 @@ void Document::setUniformExposure(int layer, int n) {
     undo_->clear();
     notifyStructure();
     setModified(true);
+}
+
+// 프로젝트 파일이 옮겨졌을 때, 소리 파일을 .ony 옆이나 _files 폴더에서 다시 찾아 준다.
+int Document::relinkMissingAudio() {
+    if (path_.isEmpty()) return 0;
+    const QDir home = QFileInfo(path_).dir();
+    const QString base = QFileInfo(path_).completeBaseName();
+    int fixed = 0;
+    for (AudioTrack& t : audioTracks_) {
+        if (t.path.isEmpty() || QFile::exists(t.path)) continue;
+        const QString fileName = QFileInfo(t.path).fileName();
+        const QStringList tries = {home.filePath(fileName),
+                                   home.filePath(base + "_files/" + fileName),
+                                   home.filePath("소리/" + fileName),
+                                   home.filePath("audio/" + fileName)};
+        for (const QString& cand : tries) {
+            if (!QFile::exists(cand)) continue;
+            t.path = cand;
+            ++fixed;
+            break;
+        }
+    }
+    if (fixed) emit audioChanged();
+    return fixed;
+}
+
+// 프로젝트와 거기에 쓰인 소리 파일을 한 폴더에 모아서 저장한다 (다른 컴퓨터로 옮겨도 소리가 따라간다).
+bool Document::packTo(const QString& onyPath, QString* report) {
+    const QFileInfo fi(onyPath);
+    QDir home = fi.dir();
+    if (!home.exists() && !QDir().mkpath(home.absolutePath())) {
+        if (report) *report = QStringLiteral("폴더를 만들지 못했습니다");
+        return false;
+    }
+    const QString sub = fi.completeBaseName() + "_files";
+    const QVector<AudioTrack> keep = audioTracks_;
+    int copied = 0;
+    QStringList missing;
+    if (!audioTracks_.isEmpty() && !home.exists(sub) && !home.mkpath(sub)) {
+        audioTracks_ = keep;
+        if (report) *report = QStringLiteral("소리 폴더를 만들지 못했습니다");
+        return false;
+    }
+    for (AudioTrack& t : audioTracks_) {
+        if (t.path.isEmpty()) continue;
+        if (!QFile::exists(t.path)) {
+            missing << QFileInfo(t.path).fileName();
+            continue;
+        }
+        const QString dest = home.filePath(sub + "/" + QFileInfo(t.path).fileName());
+        if (QFileInfo(t.path).absoluteFilePath() == QFileInfo(dest).absoluteFilePath()) {
+            t.path = dest;
+            continue;
+        }
+        QFile::remove(dest);
+        if (QFile::copy(t.path, dest)) {
+            t.path = dest;
+            ++copied;
+        } else {
+            missing << QFileInfo(t.path).fileName();
+        }
+    }
+    const bool ok = saveCopy(onyPath);
+    audioTracks_ = keep;   // 지금 열려 있는 프로젝트의 경로는 건드리지 않는다
+    if (report) {
+        if (!ok) *report = QStringLiteral("프로젝트를 저장하지 못했습니다");
+        else {
+            *report = QStringLiteral("소리 파일 %1개를 함께 넣었습니다").arg(copied);
+            if (!missing.isEmpty())
+                *report += QStringLiteral(". 찾지 못한 파일: ") + missing.join(", ");
+        }
+    }
+    return ok;
 }
 
 bool Document::saveCopy(const QString& path) {

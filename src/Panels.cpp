@@ -715,8 +715,24 @@ FxPanel::FxPanel(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) {
     cat->addItems(Effects::categories());
     type_ = new QComboBox;
     param_ = new QSpinBox;
+    fxColor_ = new QToolButton;
+    fxColor_->setFixedSize(24, 24);
+    fxColor_->setToolTip(QStringLiteral("효과에 쓸 색"));
+    fxColorValue_ = QColor(0, 200, 0);
+    auto paintSwatch = [this] {
+        fxColor_->setStyleSheet(QString("background:%1;border:1px solid #333;").arg(fxColorValue_.name()));
+    };
+    paintSwatch();
+    connect(fxColor_, &QToolButton::clicked, this, [this, paintSwatch] {
+        const QColor c = QColorDialog::getColor(fxColorValue_, this, QStringLiteral("효과에 쓸 색"));
+        if (!c.isValid()) return;
+        fxColorValue_ = c;
+        paintSwatch();
+    });
     auto syncType = [this] {
-        const auto pi = Effects::paramInfo(Effects::Type(type_->currentData().toInt()));
+        const auto t = Effects::Type(type_->currentData().toInt());
+        const auto pi = Effects::paramInfo(t);
+        fxColor_->setVisible(Effects::usesColorParam(t));
         param_->setEnabled(pi.has);
         if (pi.has) {
             param_->setRange(pi.lo, pi.hi);
@@ -737,6 +753,7 @@ FxPanel::FxPanel(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) {
     fillTypes();
     row->addWidget(cat);
     row->addWidget(type_);
+    row->addWidget(fxColor_);
     row->addWidget(param_);
     lay->addLayout(row);
     auto* row2 = new QHBoxLayout;
@@ -752,7 +769,8 @@ FxPanel::FxPanel(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) {
     connect(add, &QToolButton::clicked, this, [this] {
         Effects::Item item;
         item.type = Effects::Type(type_->currentData().toInt());
-        item.param = param_->value();
+        item.param = Effects::usesColorParam(item.type) ? Effects::packColorParam(fxColorValue_, param_->value())
+                                                        : param_->value();
         doc_->addFx(doc_->currentLayer(), item);
     });
     connect(del, &QToolButton::clicked, this, [this] {
@@ -769,7 +787,10 @@ void FxPanel::rebuild() {
     list_->clear();
     for (const auto& fx : L.fx) {
         QString s = Effects::typeName(fx.type);
-        if (Effects::paramInfo(fx.type).has) s += QString(" (%1)").arg(fx.param);
+        if (Effects::usesColorParam(fx.type))
+            s += QString(" (%1, 오차 %2)").arg(Effects::colorFromParam(fx.param).name().toUpper()).arg(Effects::strengthFromParam(fx.param));
+        else if (Effects::paramInfo(fx.type).has)
+            s += QString(" (%1)").arg(fx.param);
         list_->addItem(s);
     }
 }

@@ -28,7 +28,7 @@ ChangesAssociations=yes
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "바탕화면에 바로가기 만들기"; GroupDescription: "추가 작업:"
+Name: "desktopicon"; Description: "바탕화면에 바로가기 만들기 (바로가기에는 Windows 가 화살표를 붙입니다)"; GroupDescription: "추가 작업:"
 Name: "assoc"; Description: ".ony 파일을 ONY 로 열기"; GroupDescription: "추가 작업:"
 
 [Files]

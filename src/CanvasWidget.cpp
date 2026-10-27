@@ -137,15 +137,31 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
     if (cacheDirty_ || !sizeOk) {
         // 획을 그리는 중이면 바뀐 곳만 다시 합성한다 (큰 캔버스·여러 레이어에서 크게 빨라진다)
         bool done = false;
-        if (sizeOk && stroking_ && !partialDirty_.isNull() && !cameraView_)
+        if (sizeOk && stroking_ && !partialDirty_.isNull() && !cameraView_ && !(!ref_.isNull() && !refOnTop_))
             done = doc_->compositeRegion(cache_, partialDirty_, doc_->currentFrame(), true);
-        if (!done) cache_ = doc_->composite(doc_->currentFrame(), true, cameraView_);
+        // 참조 이미지를 캔버스 뒤에 둘 때는 종이를 깔지 않아야 비쳐 보인다
+        const bool paper = !(!ref_.isNull() && !refOnTop_);
+        if (!done) cache_ = doc_->composite(doc_->currentFrame(), paper, cameraView_);
         cacheDirty_ = false;
         partialDirty_ = QRect();
     }
     const QSize s = doc_->size();
     const QRectF r(imageTopLeft(), QSizeF(s.width() * zoom_, s.height() * zoom_));
     p.setRenderHint(QPainter::SmoothPixmapTransform, zoom_ < 1.0);
+    // 참조 이미지를 캔버스 자리에 비율을 지켜 맞춘다
+    auto drawReference = [&] {
+        if (ref_.isNull() || refOpacity_ <= 0.001) return;
+        const double sc = std::min(r.width() / ref_.width(), r.height() / ref_.height());
+        const QSizeF ds(ref_.width() * sc, ref_.height() * sc);
+        const QRectF dst(r.x() + (r.width() - ds.width()) / 2, r.y() + (r.height() - ds.height()) / 2,
+                         ds.width(), ds.height());
+        p.save();
+        p.setOpacity(refOpacity_);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        p.drawImage(dst, ref_);
+        p.restore();
+    };
+    if (!refOnTop_) drawReference();
     // 화면에 보이는 부분만 그린다 (크게 확대했을 때 특히 빠르다)
     const QRectF visible = QRectF(rect()).intersected(r);
     if (visible.isEmpty()) {
@@ -237,6 +253,7 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
         p.setOpacity(1.0);
         p.drawImage(r, ltOverlay_);
     }
+    if (refOnTop_) drawReference();
 
     // 오버레이(이미지 좌표계)
     p.save();
@@ -288,11 +305,19 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
     if (doc_->isVectorLayer(doc_->currentLayer()) && (tool_ == Tool::Select || vecEditStroke_ >= 0)) {
         const QVector<VecStroke>* list = doc_->vectorStrokes(doc_->currentLayer(), doc_->currentFrame());
         if (list) {
-            p.setPen(QPen(QColor(0x30, 0xc8, 0xa0), 0));
-            p.setBrush(Qt::white);
             const double r = 3.0 / zoom_;
-            for (const VecStroke& s : *list)
-                for (const QPointF& pt : s.pts) p.drawEllipse(pt, r, r);
+            for (int si = 0; si < list->size(); ++si) {
+                const VecStroke& s = (*list)[si];
+                const bool sel = si == vecSel_;
+                if (sel && s.pts.size() > 1) {   // 고른 획은 밝은 선으로 덧그린다
+                    p.setBrush(Qt::NoBrush);
+                    p.setPen(QPen(QColor(0x4a, 0x90, 0xe2, 200), 0, Qt::DashLine));
+                    p.drawPolyline(QPolygonF(s.pts));
+                }
+                p.setPen(QPen(sel ? QColor(0x4a, 0x90, 0xe2) : QColor(0x30, 0xc8, 0xa0), 0));
+                p.setBrush(sel ? QColor(0xff, 0xee, 0x88) : QColor(Qt::white));
+                for (const QPointF& pt : s.pts) p.drawEllipse(pt, sel ? r * 1.4 : r, sel ? r * 1.4 : r);
+            }
         }
     }
     if (!lassoPts_.isEmpty()) {
@@ -674,8 +699,11 @@ void CanvasWidget::mousePressEvent(QMouseEvent* e) {
     }
     if (e->button() != Qt::LeftButton) return;
 
-    // Alt 를 누른 채 클릭하면 어떤 도구에서든 색을 집는다 (임시 스포이트)
-    if ((e->modifiers() & Qt::AltModifier) && tool_ != Tool::Lasso && tool_ != Tool::Polygon && tool_ != Tool::Wand) {
+    // Alt 를 누른 채 클릭하면 어떤 도구에서든 색을 집는다 (임시 스포이트).
+    // 다만 벡터 레이어에서 선택 도구일 때는 Alt+클릭이 "점 지우기" 라서 비켜 준다.
+    const bool vecEditing = tool_ == Tool::Select && doc_->isVectorLayer(doc_->currentLayer()) && !selValid_;
+    if ((e->modifiers() & Qt::AltModifier) && !vecEditing && tool_ != Tool::Lasso && tool_ != Tool::Polygon &&
+        tool_ != Tool::Wand) {
         pickColorAt(ip);
         return;
     }
@@ -751,19 +779,62 @@ void CanvasWidget::mousePressEvent(QMouseEvent* e) {
         break;
     }
     case Tool::Select:
-        // 벡터 레이어에서는 획의 점을 끌어 모양을 고칠 수 있다
+        // 벡터 레이어: 점 끌기 · 점 추가·삭제 · 획 고르기 · 획 통째로 옮기기
         if (doc_->isVectorLayer(doc_->currentLayer()) && !selValid_) {
             const QVector<VecStroke>* list = doc_->vectorStrokes(doc_->currentLayer(), doc_->currentFrame());
             if (list) {
-                const double r = 8.0 / zoom_;
-                for (int s = 0; s < list->size(); ++s)
-                    for (int k = 0; k < (*list)[s].pts.size(); ++k)
-                        if (QLineF((*list)[s].pts[k], ip).length() < r) {
-                            vecEditStroke_ = s;
-                            vecEditPoint_ = k;
-                            vecWork_ = *list;
-                            return;
+                int hs = -1;
+                const int hp = vecHitPoint(ip, &hs);
+                if (hp >= 0) {
+                    if (e->modifiers() & Qt::AltModifier) {   // Alt+클릭 = 점 지우기
+                        QVector<VecStroke> w = *list;
+                        if (w[hs].pts.size() <= 2) {
+                            emit message(QStringLiteral("점이 두 개뿐이라 지울 수 없습니다. 획을 지우려면 레이어 메뉴를 쓰세요."));
+                        } else {
+                            w[hs].pts.remove(hp);
+                            if (hp < w[hs].pressure.size()) w[hs].pressure.remove(hp);
+                            doc_->setVectorStrokes(doc_->currentLayer(), doc_->currentFrame(), w);
+                            emit message(QStringLiteral("점을 지웠습니다."));
                         }
+                        setSelectedVectorStroke(hs);
+                        return;
+                    }
+                    vecEditStroke_ = hs;
+                    vecEditPoint_ = hp;
+                    vecWork_ = *list;
+                    setSelectedVectorStroke(hs);
+                    return;
+                }
+                int seg = -1;
+                QPointF at;
+                const int st = vecHitStroke(ip, &seg, &at);
+                if (st >= 0) {
+                    if (e->modifiers() & Qt::ControlModifier) {   // Ctrl+클릭 = 선 위에 점 추가
+                        QVector<VecStroke> w = *list;
+                        w[st].pts.insert(seg + 1, at);
+                        w[st].pressure.insert(std::min(seg + 1, int(w[st].pressure.size())), 1.0f);
+                        doc_->setVectorStrokes(doc_->currentLayer(), doc_->currentFrame(), w);
+                        setSelectedVectorStroke(st);
+                        vecEditStroke_ = st;
+                        vecEditPoint_ = seg + 1;
+                        vecWork_ = *doc_->vectorStrokes(doc_->currentLayer(), doc_->currentFrame());
+                        emit message(QStringLiteral("점을 넣었습니다."));
+                        return;
+                    }
+                    if (e->modifiers() & Qt::ShiftModifier) {     // Shift+끌기 = 획 통째로 옮기기
+                        setSelectedVectorStroke(st);
+                        vecEditStroke_ = st;
+                        vecEditPoint_ = -1;
+                        vecMoveWhole_ = true;
+                        vecMoveFrom_ = ip;
+                        vecWork_ = *list;
+                        return;
+                    }
+                    setSelectedVectorStroke(st);
+                    emit message(QString("획 %1 을 골랐습니다. Shift+끌기로 옮기고, Ctrl+클릭으로 점을 넣고, Alt+클릭으로 점을 지웁니다.").arg(st + 1));
+                    return;
+                }
+                setSelectedVectorStroke(-1);
             }
         }
         if (selValid_ && selRect_.contains(ip.toPoint())) {
@@ -907,7 +978,12 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent* e) {
         floatPos_ = selRect_.topLeft() + (ip - moveStart_).toPoint();
         update();
     } else if (vecEditStroke_ >= 0 && (e->buttons() & Qt::LeftButton)) {
-        if (vecEditStroke_ < vecWork_.size() && vecEditPoint_ < vecWork_[vecEditStroke_].pts.size()) {
+        if (vecMoveWhole_ && vecEditStroke_ < vecWork_.size()) {
+            const QPointF d = ip - vecMoveFrom_;
+            QVector<VecStroke> w = vecWork_;
+            for (QPointF& pt : w[vecEditStroke_].pts) pt += d;
+            doc_->setVectorStrokes(doc_->currentLayer(), doc_->currentFrame(), w);
+        } else if (vecEditPoint_ >= 0 && vecEditStroke_ < vecWork_.size() && vecEditPoint_ < vecWork_[vecEditStroke_].pts.size()) {
             vecWork_[vecEditStroke_].pts[vecEditPoint_] = ip;
             doc_->setVectorStrokes(doc_->currentLayer(), doc_->currentFrame(), vecWork_);
         }
@@ -1029,6 +1105,7 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent* e) {
     } else if (vecEditStroke_ >= 0) {
         vecEditStroke_ = -1;
         vecEditPoint_ = -1;
+        vecMoveWhole_ = false;
         emit strokeFinished();
     } else if (dragPin_ >= 0) {
         dragPin_ = -1;
@@ -1504,6 +1581,60 @@ void CanvasWidget::wandSelect(const QPoint& seed, Qt::KeyboardModifiers mods) {
         return;
     }
     setSelectionMask(m);
+}
+
+// ---------------- 벡터 획 고르기 ----------------
+void CanvasWidget::setSelectedVectorStroke(int i) {
+    const QVector<VecStroke>* list = doc_->vectorStrokes(doc_->currentLayer(), doc_->currentFrame());
+    vecSel_ = (list && i >= 0 && i < list->size()) ? i : -1;
+    update();
+    emit vectorStrokeSelected(vecSel_);
+}
+
+int CanvasWidget::vecHitPoint(const QPointF& ip, int* strokeOut) const {
+    const QVector<VecStroke>* list = doc_->vectorStrokes(doc_->currentLayer(), doc_->currentFrame());
+    if (!list) return -1;
+    const double r = 8.0 / zoom_;
+    for (int s = 0; s < list->size(); ++s)
+        for (int k = 0; k < (*list)[s].pts.size(); ++k)
+            if (QLineF((*list)[s].pts[k], ip).length() < r) {
+                if (strokeOut) *strokeOut = s;
+                return k;
+            }
+    return -1;
+}
+
+// 선분 위를 눌렀는지. segOut 에는 몇 번째 점 뒤인지, atOut 에는 선 위의 가장 가까운 지점
+int CanvasWidget::vecHitStroke(const QPointF& ip, int* segOut, QPointF* atOut) const {
+    const QVector<VecStroke>* list = doc_->vectorStrokes(doc_->currentLayer(), doc_->currentFrame());
+    if (!list) return -1;
+    double best = 1e18;
+    int bestS = -1, bestSeg = -1;
+    QPointF bestAt;
+    for (int s = 0; s < list->size(); ++s) {
+        const VecStroke& st = (*list)[s];
+        const double tol = std::max(6.0 / zoom_, st.width * 0.6 + 3.0 / zoom_);
+        for (int k = 0; k + 1 < st.pts.size(); ++k) {
+            const QPointF a = st.pts[k], b = st.pts[k + 1];
+            const QPointF ab = b - a;
+            const double len2 = ab.x() * ab.x() + ab.y() * ab.y();
+            double t = len2 < 1e-9 ? 0.0 : ((ip.x() - a.x()) * ab.x() + (ip.y() - a.y()) * ab.y()) / len2;
+            t = std::clamp(t, 0.0, 1.0);
+            const QPointF c = a + ab * t;
+            const double d = QLineF(c, ip).length();
+            if (d < tol && d < best) {
+                best = d;
+                bestS = s;
+                bestSeg = k;
+                bestAt = c;
+            }
+        }
+    }
+    if (bestS >= 0) {
+        if (segOut) *segOut = bestSeg;
+        if (atOut) *atOut = bestAt;
+    }
+    return bestS;
 }
 
 // 색 추출(스포이트): 보이는 그림에서 색을 집는다

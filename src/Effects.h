@@ -25,7 +25,15 @@ enum class Type {
     Pixelate, Emboss, Edge, Outline, Sharpen,
     // 색 보정 (파라미터가 많아 FX 스택에는 세기 하나로만 들어간다)
     Curves, Levels,
-    Last = Levels
+    // 데모6: TVPaint 의 FX 목록을 참고해 넓힌 효과들
+    RadialBlur, SpinBlur,                                  // 블러
+    Solarize, BlackWhite, ColorRange, Lumix,               // 색
+    Lens, Ripple,                                          // 왜곡
+    ColorKeyer,                                            // 키잉
+    Glow, Bloom, Halo,                                     // 렌더링
+    ToonShading, Bevel, Erode, Dilate, Halftone, Dither, AntiAlias,   // 스타일화
+    RepeatLine, Dashes,                                    // 페인트
+    Last = Dashes
 };
 
 struct ParamInfo {
@@ -34,6 +42,12 @@ struct ParamInfo {
     QString label;
 };
 ParamInfo paramInfo(Type t);
+// 색을 쓰는 효과인지 (param 에 색이 들어간다)
+bool usesColorParam(Type t);
+// param 에 색과 세기를 함께 담는다 (상위 7비트 = 세기, 하위 24비트 = RGB)
+int packColorParam(const QColor& c, int strength);
+QColor colorFromParam(int param);
+int strengthFromParam(int param);
 QString categoryOf(Type t);
 QStringList categories();            // 메뉴 순서: 블러, 색, 왜곡, 키잉, 모션, 렌더링, 스타일화
 QVector<Type> typesIn(const QString& category);

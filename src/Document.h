@@ -167,6 +167,8 @@ public:
     int resolveKey(int layer, int frame) const;
     int firstKey(int layer) const;
     int lastKey(int layer) const;
+    // 레이어 내용이 끝나는 프레임(미포함). 이 뒤부터 포스트 비헤이비어가 적용된다.
+    int contentEnd(int layer) const;
     int nextKeyIndex(int layer, int frame) const;
     QImage keyImage(int layer, int key) const;
     QImage* editableImage(int layer, int frame);
@@ -271,6 +273,10 @@ public:
     // 현재 레이어만 보기 ('=')
     bool soloCurrent() const { return soloCurrent_; }
     void setSoloCurrent(bool on) { soloCurrent_ = on; notifyChanged(); }
+    // 마지막 이미지 뒤(또는 첫 이미지 앞)의 프레임에 그리면 그 자리에 새 이미지를 만든다.
+    // 끄면 예전처럼 유지되던 이미지를 그대로 고친다.
+    bool newImagePastEnd() const { return newImagePastEnd_; }
+    void setNewImagePastEnd(bool on) { newImagePastEnd_ = on; }
     // 스텐실: layer 에 그릴 때 허용되는 영역(0~255 알파 마스크). 스텐실이 없으면 null 이미지.
     QImage stencilMaskFor(int layer, int frame) const;
 
@@ -316,6 +322,10 @@ public:
     bool save(const QString& path);
     bool load(const QString& path);
     bool saveCopy(const QString& path); // 현재 경로/수정 상태를 바꾸지 않고 사본만 저장
+    // 프로젝트 + 소리 파일을 한 폴더로 모아 저장한다 (옮겨도 소리가 따라간다)
+    bool packTo(const QString& onyPath, QString* report = nullptr);
+    // 소리 파일이 제자리에 없으면 .ony 옆 / _files 폴더에서 찾아 경로를 고친다. 고친 개수를 돌려준다.
+    int relinkMissingAudio();
     QString path() const { return path_; }
     void clearPath() { path_.clear(); } // 템플릿에서 만든 프로젝트는 이름 없음 상태로 시작
     // 이미지 메뉴용
@@ -377,6 +387,7 @@ private:
     bool bookmarksOn_ = true;
     QVector<MarkColor> markColors_{{QStringLiteral("빨강"), QColor(0xe5, 0x39, 0x35)}};
     bool soloCurrent_ = false;
+    bool newImagePastEnd_ = true;
     QUndoStack* undo_;
     // 효과(FX) 결과 캐시: 같은 그림에 같은 효과면 다시 계산하지 않는다
     struct FxCacheEntry {

@@ -9,6 +9,7 @@
 
 #include <QDialogButtonBox>
 #include <QFile>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -21,6 +22,7 @@
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QRandomGenerator>
 #include <QSettings>
 #include <QSpinBox>
 #include <QVBoxLayout>
@@ -145,7 +147,19 @@ QString ScriptEngine::help() {
         "  while 조건 ... end\n"
         "  for i = 1 to 10 [step 2] ... end      (안에서 $i 로 씀)\n"
         "  repeat A B 명령                        (한 줄 반복, {i} 가 값으로 바뀜)\n"
-        "  식에 쓸 수 있는 것: + - * / % ( ) < > <= >= == != and or not abs min max int sin cos\n"
+        "  do ... until 조건                      (George 방식. 한 번은 꼭 돈다)\n"
+        "  식에 쓸 수 있는 것: + - * / % ( ) < > <= >= == != and or not\n"
+        "    abs min max int floor ceil round sign sqrt pow(a,b) exp log\n"
+        "    sin cos tan asin acos atan(a[,b]) rnd() rnd(n) rnd(a,b) pi\n"
+        "■ George 호환\n"
+        "  tv_ 로 시작하는 이름을 알아듣습니다 (대소문자 가리지 않음, \"따옴표\" 는 벗겨 줍니다)\n"
+        "    tv_LayerCreate tv_LayerSelect tv_LayerKill tv_LayerRename tv_LayerDisplay\n"
+        "    tv_LayerDensity tv_LayerBlendingMode tv_LayerLock tv_LayerMove tv_DuplicateLayer\n"
+        "    tv_LayerMerge tv_ClearLayer tv_LayerImage tv_ExposureAdd tv_FrameRate\n"
+        "    tv_Rect tv_Line tv_Ellipse tv_SaveProject tv_SaveImage tv_WriteText tv_Version\n"
+        "  바로 앞 명령의 결과는 $result 에 담깁니다\n"
+        "  콘솔의 [열기]·[저장] 으로 .grg / .txt 스크립트 파일을 주고받을 수 있습니다\n"
+        "  ONY 는 TVPaint 와 같은 프로그램이 아니라서, 위에 없는 tv_ 명령은 알아듣지 못합니다\n"
         "■ 프로젝트 · 레이어\n"
         "  frame N | frames N | fps N\n"
         "  layer.new 이름 | layer.select N | layer.delete | layer.rename 이름\n"
@@ -193,10 +207,27 @@ QString ScriptEngine::run(const QString& script) {
 // if / while / for 의 짝이 맞는 end 줄 번호 (없으면 -1)
 int ScriptEngine::matchEnd(const QStringList& lines, int start, int to) const {
     int depth = 0;
+    const QString head = lines[start].trimmed().section(QRegularExpression("\\s+"), 0, 0).toLower();
+    // George 의 do … until 은 end 가 아니라 until 로 닫는다
+    if (head == "do") {
+        for (int i = start; i < to; ++i) {
+            const QString t = lines[i].trimmed().section(QRegularExpression("\\s+"), 0, 0).toLower();
+            if (t == "do") ++depth;
+            else if (t == "until") {
+                --depth;
+                if (depth == 0) return i;
+            }
+        }
+        return -1;
+    }
     for (int i = start; i < to; ++i) {
         const QString t = lines[i].trimmed().section(QRegularExpression("\\s+"), 0, 0).toLower();
         if (t == "if" || t == "while" || t == "for") ++depth;
-        else if (t == "end") {
+        else if (t == "do") {   // do 블록은 통째로 건너뛴다
+            const int u = matchEnd(lines, i, to);
+            if (u < 0) return -1;
+            i = u;
+        } else if (t == "end") {
             --depth;
             if (depth == 0) return i;
         }
@@ -286,9 +317,30 @@ QString ScriptEngine::runBlock(const QStringList& lines, int from, int to, int d
             i = endIdx;
             continue;
         }
-        if (head == "else" || head == "end") continue;
+        if (head == "do") {
+            // do … until 조건  (George). 본문을 한 번 돌고 조건이 참이 될 때까지 되풀이한다.
+            const int untilIdx = matchEnd(lines, i, to);
+            if (untilIdx < 0) return log + QString("%1: do 에 맞는 until 이 없습니다\n").arg(i + 1);
+            const QString cond = lines[untilIdx].trimmed().section(QRegularExpression("\\s+"), 1);
+            int guard = 0;
+            do {
+                if (++guard > 100000 || ++steps_ > 500000) {
+                    log += QStringLiteral("do 가 너무 오래 돕니다\n");
+                    break;
+                }
+                log += runBlock(lines, i + 1, untilIdx, depth + 1);
+            } while (cond.isEmpty() ? false : eval(cond) == 0.0);
+            i = untilIdx;
+            continue;
+        }
+        if (head == "else" || head == "end" || head == "until") continue;
 
         const QString r = runLine(line, depth);
+        // George 처럼 바로 앞 명령의 결과를 $result 로 쓸 수 있게 둔다
+        svars_[QStringLiteral("result")] = r;
+        bool okNum = false;
+        const double rd = r.toDouble(&okNum);
+        vars_[QStringLiteral("result")] = okNum ? rd : 0.0;
         if (!r.isEmpty()) log += QString("%1: %2\n").arg(i + 1).arg(r);
     }
     return log;
@@ -411,6 +463,41 @@ struct Expr {
         if (word("int")) { sym("("); const double v = orExpr(); sym(")"); return std::floor(v); }
         if (word("sin")) { sym("("); const double v = orExpr(); sym(")"); return std::sin(v); }
         if (word("cos")) { sym("("); const double v = orExpr(); sym(")"); return std::cos(v); }
+        // George 호환 함수들
+        if (word("tan")) { sym("("); const double v = orExpr(); sym(")"); return std::tan(v); }
+        if (word("asin")) { sym("("); const double v = orExpr(); sym(")"); return std::asin(std::clamp(v, -1.0, 1.0)); }
+        if (word("acos")) { sym("("); const double v = orExpr(); sym(")"); return std::acos(std::clamp(v, -1.0, 1.0)); }
+        if (word("atan")) {
+            sym("(");
+            const double a = orExpr();
+            if (sym(",")) { const double b = orExpr(); sym(")"); return std::atan2(a, b); }
+            sym(")");
+            return std::atan(a);
+        }
+        if (word("sqrt")) { sym("("); const double v = orExpr(); sym(")"); return v <= 0 ? 0 : std::sqrt(v); }
+        if (word("exp")) { sym("("); const double v = orExpr(); sym(")"); return std::exp(std::clamp(v, -700.0, 700.0)); }
+        if (word("log")) { sym("("); const double v = orExpr(); sym(")"); return v <= 0 ? 0 : std::log(v); }
+        if (word("pow")) { sym("("); const double a = orExpr(); sym(","); const double b = orExpr(); sym(")"); return std::pow(a, b); }
+        if (word("floor")) { sym("("); const double v = orExpr(); sym(")"); return std::floor(v); }
+        if (word("ceil")) { sym("("); const double v = orExpr(); sym(")"); return std::ceil(v); }
+        if (word("round")) { sym("("); const double v = orExpr(); sym(")"); return std::floor(v + 0.5); }
+        if (word("sign")) { sym("("); const double v = orExpr(); sym(")"); return v > 0 ? 1 : (v < 0 ? -1 : 0); }
+        if (word("rnd")) {
+            // Rnd(n) → 0..n 의 정수, Rnd(a,b) → a..b, Rnd() → 0..1 의 실수
+            sym("(");
+            if (sym(")")) return double(QRandomGenerator::global()->generateDouble());
+            const double a = orExpr();
+            if (sym(",")) {
+                const double b = orExpr();
+                sym(")");
+                const int lo = int(std::floor(std::min(a, b))), hi = int(std::floor(std::max(a, b)));
+                return lo + (hi > lo ? QRandomGenerator::global()->bounded(hi - lo + 1) : 0);
+            }
+            sym(")");
+            const int n = int(std::floor(std::abs(a)));
+            return n > 0 ? QRandomGenerator::global()->bounded(n + 1) : 0;
+        }
+        if (word("pi")) return 3.14159265358979323846;
         const int start = i;
         while (i < s.size() && (s[i].isDigit() || s[i] == '.')) ++i;
         if (i > start) return s.mid(start, i - start).toDouble();
@@ -431,9 +518,58 @@ double ScriptEngine::eval(const QString& expr) const {
     return e.orExpr();
 }
 
+// George(tv_…) 이름을 ONY 명령으로 옮기는 표. 모르는 tv_ 명령은 호스트로 넘어간다.
+static const QHash<QString, QString>& georgeAliases() {
+    static const QHash<QString, QString> m = {
+        {"tv_layercreate", "layer.new"},
+        {"tv_layerselect", "layer.select"},
+        {"tv_layercurrentid", "layer.select"},
+        {"tv_layerkill", "layer.delete"},
+        {"tv_layerrename", "layer.rename"},
+        {"tv_layerdisplay", "layer.visible"},
+        {"tv_layerdensity", "layer.opacity"},
+        {"tv_layeropacity", "layer.opacity"},
+        {"tv_layerblendingmode", "layer.blend"},
+        {"tv_layerlock", "layer.lock"},
+        {"tv_layermove", "layer.move"},
+        {"tv_duplicatelayer", "layer.duplicate"},
+        {"tv_layerduplicate", "layer.duplicate"},
+        {"tv_layermerge", "layer.mergedown"},
+        {"tv_clearlayer", "clear"},
+        {"tv_layerimage", "frame"},
+        {"tv_projectcurrentframe", "frame"},
+        {"tv_layerinsertimage", "key.clear"},
+        {"tv_exposureadd", "key.exposure"},
+        {"tv_exposureset", "key.exposure"},
+        {"tv_framerate", "fps"},
+        {"tv_rect", "rect"},
+        {"tv_line", "line"},
+        {"tv_ellipse", "ellipse"},
+        {"tv_saveproject", "save"},
+        {"tv_savedisplay", "export.png"},
+        {"tv_saveimage", "export.png"},
+        {"tv_writetext", "print"},
+        {"tv_warn", "print"},
+        {"tv_version", "version"},
+    };
+    return m;
+}
+
 QString ScriptEngine::runLine(const QString& rawLine, int depth) {
     if (depth > 16) return QStringLiteral("너무 깊습니다");
-    const QString line = expand(rawLine);
+    QString line = expand(rawLine);
+    {   // George 호환: tv_ 로 시작하는 이름을 바꾸고, "따옴표" 를 벗긴다
+        const int sp = line.indexOf(QRegularExpression("\\s"));
+        const QString head = (sp < 0 ? line : line.left(sp)).trimmed();
+        if (head.startsWith(QLatin1String("tv_"), Qt::CaseInsensitive)) {
+            const QString mapped = georgeAliases().value(head.toLower());
+            if (!mapped.isEmpty()) {
+                QString tail = sp < 0 ? QString() : line.mid(sp);
+                tail.replace('"', ' ');
+                line = mapped + tail;
+            }
+        }
+    }
     const QStringList t = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
     if (t.isEmpty()) return {};
     const QString cmd = t[0].toLower();
@@ -635,6 +771,7 @@ QString ScriptEngine::runLine(const QString& rawLine, int depth) {
     if (cmd == "save") { return doc_->save(rest) ? QString() : QStringLiteral("저장하지 못했습니다"); }
     if (cmd == "savecopy") { return doc_->saveCopy(rest) ? QString() : QStringLiteral("저장하지 못했습니다"); }
     if (cmd == "export.png") { return doc_->exportFrame(doc_->currentFrame(), rest) ? QString() : QStringLiteral("내보내지 못했습니다"); }
+    if (cmd == "version") return QStringLiteral("ONY");
     if (host_) {
         const auto r = host_(t);
         if (r.has_value()) return *r;
@@ -653,9 +790,39 @@ ScriptConsole::ScriptConsole(Document* doc, QWidget* parent) : QWidget(parent), 
     auto* row = new QHBoxLayout;
     auto* run = new QPushButton(QStringLiteral("실행"));
     auto* help = new QPushButton(QStringLiteral("도움말"));
+    auto* open = new QPushButton(QStringLiteral("열기"));
+    auto* save = new QPushButton(QStringLiteral("저장"));
+    open->setToolTip(QStringLiteral("스크립트 파일을 불러옵니다 (.grg, .txt)"));
+    save->setToolTip(QStringLiteral("지금 쓴 스크립트를 파일로 저장합니다 (.grg, .txt)"));
     row->addWidget(run);
     row->addWidget(help);
+    row->addWidget(open);
+    row->addWidget(save);
     row->addStretch();
+    static const QString kFilter = QStringLiteral("스크립트 (*.grg *.txt);;모든 파일 (*)");
+    connect(open, &QPushButton::clicked, this, [this] {
+        const QString p = QFileDialog::getOpenFileName(this, QStringLiteral("스크립트 열기"), QString(), kFilter);
+        if (p.isEmpty()) return;
+        QFile f(p);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            output_->setPlainText(QStringLiteral("열지 못했습니다: ") + p);
+            return;
+        }
+        input_->setPlainText(QString::fromUtf8(f.readAll()));
+        output_->setPlainText(QStringLiteral("불러왔습니다: ") + p);
+    });
+    connect(save, &QPushButton::clicked, this, [this] {
+        QString p = QFileDialog::getSaveFileName(this, QStringLiteral("스크립트 저장"), QString(), kFilter);
+        if (p.isEmpty()) return;
+        if (!p.contains('.')) p += QStringLiteral(".grg");
+        QFile f(p);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            output_->setPlainText(QStringLiteral("저장하지 못했습니다: ") + p);
+            return;
+        }
+        f.write(input_->toPlainText().toUtf8());
+        output_->setPlainText(QStringLiteral("저장했습니다: ") + p);
+    });
     lay->addWidget(input_, 2);
     lay->addLayout(row);
     lay->addWidget(output_, 3);
@@ -892,6 +1059,199 @@ void StoryboardPanel::rebuild() {
         auto* item = new QListWidgetItem(QIcon(QPixmap::fromImage(thumb)), QString("%1\n%2").arg(f + 1).arg(doc_->note(f)));
         item->setData(Qt::UserRole, f);
         list_->addItem(item);
+    }
+}
+
+// ---------------------------------------------------------------- 뼈대(본) 변형
+BoneWarpDialog::BoneWarpDialog(const QImage& img, QWidget* parent) : QDialog(parent), img_(img) {
+    setWindowTitle(QStringLiteral("뼈대 변형 — 빈 곳을 끌어 뼈를 놓고, 뼈 끝을 끌어 휘게 합니다"));
+    resize(920, 640);
+    setMouseTracking(true);
+    auto* bar = new QWidget(this);
+    auto* bh = new QHBoxLayout(bar);
+    bh->setContentsMargins(0, 0, 0, 0);
+    bh->addWidget(new QLabel(QStringLiteral("영향 범위")));
+    radiusBox_ = new QSpinBox;
+    radiusBox_->setRange(10, 800);
+    radiusBox_->setValue(int(radius_));
+    radiusBox_->setSuffix(QStringLiteral(" px"));
+    radiusBox_->setToolTip(QStringLiteral("새로 놓는 뼈가 끌어당길 범위입니다. 고른 뼈가 있으면 그 뼈의 범위를 바꿉니다."));
+    bh->addWidget(radiusBox_);
+    auto* undo = new QPushButton(QStringLiteral("뼈 하나 지우기"));
+    auto* clear = new QPushButton(QStringLiteral("모두 지우기"));
+    auto* reset = new QPushButton(QStringLiteral("자세 되돌리기"));
+    auto* orig = new QPushButton(QStringLiteral("원본 보기"));
+    orig->setCheckable(true);
+    for (QPushButton* b : {undo, clear, reset, orig}) bh->addWidget(b);
+    auto* follow = new QCheckBox(QStringLiteral("범위 밖도 따라오기"));
+    follow->setToolTip(QStringLiteral("켜면 뼈 범위를 벗어난 곳도 가장 가까운 뼈를 따라갑니다. 그림이 찢어지지 않습니다."));
+    follow->setChecked(followNearest_);
+    bh->addWidget(follow);
+    connect(follow, &QCheckBox::toggled, this, [this](bool on) {
+        followNearest_ = on;
+        preview_ = QImage();
+        update();
+    });
+    bh->addStretch();
+    bar->move(20, 6);
+    bar->resize(640, 28);
+    connect(radiusBox_, &QSpinBox::valueChanged, this, [this](int v) {
+        radius_ = v;
+        if (drag_ >= 0 && drag_ < bones_.size()) {
+            bones_[drag_].radius = v;
+            preview_ = QImage();
+        }
+        update();
+    });
+    connect(undo, &QPushButton::clicked, this, [this] {
+        if (!bones_.isEmpty()) bones_.removeLast();
+        preview_ = QImage();
+        update();
+    });
+    connect(clear, &QPushButton::clicked, this, [this] {
+        bones_.clear();
+        preview_ = QImage();
+        update();
+    });
+    connect(reset, &QPushButton::clicked, this, [this] {
+        for (Warp::Bone& b : bones_) {
+            b.da = b.a;
+            b.db = b.b;
+        }
+        preview_ = QImage();
+        update();
+    });
+    connect(orig, &QPushButton::toggled, this, [this](bool on) {
+        showOriginal_ = on;
+        update();
+    });
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+    connect(bb, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    bb->move(width() - 200, height() - 40);
+    bb->setFixedWidth(190);
+    bb->raise();
+}
+
+QImage BoneWarpDialog::result() const { return Warp::boneWarp(img_, bones_, followNearest_); }
+
+QRectF BoneWarpDialog::imageRect() const {
+    const QRectF area(20, 44, width() - 40, height() - 100);
+    const double s = std::min(area.width() / img_.width(), area.height() / img_.height());
+    const QSizeF sz(img_.width() * s, img_.height() * s);
+    return QRectF(area.center().x() - sz.width() / 2, area.center().y() - sz.height() / 2, sz.width(), sz.height());
+}
+QPointF BoneWarpDialog::toWidget(const QPointF& i) const {
+    const QRectF r = imageRect();
+    return QPointF(r.x() + i.x() * r.width() / img_.width(), r.y() + i.y() * r.height() / img_.height());
+}
+QPointF BoneWarpDialog::toImage(const QPointF& w) const {
+    const QRectF r = imageRect();
+    return QPointF((w.x() - r.x()) * img_.width() / r.width(), (w.y() - r.y()) * img_.height() / r.height());
+}
+
+int BoneWarpDialog::pickHandle(const QPointF& wp, bool* isEnd) const {
+    for (int i = 0; i < bones_.size(); ++i) {
+        if (QLineF(toWidget(bones_[i].da), wp).length() < 10) {
+            *isEnd = false;
+            return i;
+        }
+        if (QLineF(toWidget(bones_[i].db), wp).length() < 10) {
+            *isEnd = true;
+            return i;
+        }
+    }
+    return -1;
+}
+
+void BoneWarpDialog::mousePressEvent(QMouseEvent* e) {
+    if (e->button() != Qt::LeftButton) return;
+    const QPointF wp = e->position();
+    if (!imageRect().contains(wp)) return;
+    bool isEnd = false;
+    const int i = pickHandle(wp, &isEnd);
+    if (i >= 0) {
+        drag_ = i;
+        dragEnd_ = isEnd;
+        QSignalBlocker b(radiusBox_);
+        radiusBox_->setValue(int(bones_[i].radius));
+        return;
+    }
+    placing_ = true;
+    newStart_ = toImage(wp);
+    hover_ = newStart_;
+    update();
+}
+
+void BoneWarpDialog::mouseMoveEvent(QMouseEvent* e) {
+    const QPointF wp = e->position();
+    hover_ = toImage(wp);
+    if (drag_ >= 0 && drag_ < bones_.size()) {
+        (dragEnd_ ? bones_[drag_].db : bones_[drag_].da) = hover_;
+        preview_ = QImage();
+    }
+    if (drag_ >= 0 || placing_) update();
+}
+
+void BoneWarpDialog::mouseReleaseEvent(QMouseEvent* e) {
+    if (e->button() != Qt::LeftButton) return;
+    if (placing_) {
+        placing_ = false;
+        const QPointF end = toImage(e->position());
+        if (QLineF(newStart_, end).length() > 6) {
+            Warp::Bone b;
+            b.a = b.da = newStart_;
+            b.b = b.db = end;
+            b.radius = radius_;
+            bones_.push_back(b);
+            preview_ = QImage();
+        }
+    }
+    drag_ = -1;
+    update();
+}
+
+void BoneWarpDialog::paintEvent(QPaintEvent*) {
+    QPainter p(this);
+    p.fillRect(rect(), palette().window());
+    const QRectF r = imageRect();
+    p.fillRect(r, Qt::white);
+    if (showOriginal_ || bones_.isEmpty()) {
+        p.drawImage(r, img_);
+    } else {
+        if (preview_.isNull() || preview_.size() != img_.size()) preview_ = result();
+        p.drawImage(r, preview_);
+    }
+    // 뼈 그리기
+    for (int i = 0; i < bones_.size(); ++i) {
+        const Warp::Bone& b = bones_[i];
+        const QPointF a0 = toWidget(b.a), b0 = toWidget(b.b);
+        const QPointF a1 = toWidget(b.da), b1 = toWidget(b.db);
+        // 처음 자세는 흐리게
+        p.setPen(QPen(QColor(160, 160, 160, 120), 1, Qt::DashLine));
+        p.drawLine(a0, b0);
+        // 지금 자세
+        p.setPen(QPen(QColor(0xff, 0xaa, 0x33), 3));
+        p.drawLine(a1, b1);
+        p.setBrush(Qt::white);
+        p.setPen(QPen(QColor(0x40, 0x40, 0x40), 1));
+        p.drawEllipse(a1, 5, 5);
+        p.drawEllipse(b1, 5, 5);
+        // 영향 범위
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(QColor(0xff, 0xaa, 0x33, 60), 1, Qt::DotLine));
+        const double rr = b.radius * r.width() / img_.width();
+        p.drawEllipse(a1, rr, rr);
+        p.drawEllipse(b1, rr, rr);
+    }
+    if (placing_) {
+        p.setPen(QPen(QColor(0x4a, 0x90, 0xe2), 2, Qt::DashLine));
+        p.drawLine(toWidget(newStart_), toWidget(hover_));
+    }
+    if (bones_.isEmpty()) {
+        p.setPen(palette().color(QPalette::WindowText));
+        p.drawText(r.adjusted(10, 10, -10, -10), Qt::AlignTop | Qt::AlignHCenter,
+                   QStringLiteral("그림 위를 끌어 뼈를 놓으세요. 놓은 뒤 양 끝 동그라미를 끌면 그림이 따라 휩니다."));
     }
 }
 

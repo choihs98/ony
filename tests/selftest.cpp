@@ -9,6 +9,7 @@
 
 #include "CanvasWidget.h"
 #include "Document.h"
+#include "LipSync.h"
 #include "Effects.h"
 #include "Panels.h"
 #include "CurvesDialog.h"
@@ -549,8 +550,51 @@ static void testFxCategories(MainWindow& w) {
         CHECK(!Effects::typeName(it.type).isEmpty());
         ++n;
     }
-    CHECK(n >= 28);
-    CHECK(Effects::categories().size() == 7);
+    CHECK(n >= 50);                                   // 데모6 에서 51종으로 늘었다
+    CHECK(Effects::categories().size() == 8);         // 페인트 범주가 늘었다
+    CHECK(Effects::categories().contains(QStringLiteral("페인트")));
+    // 색을 고르는 효과: 색과 허용 오차를 param 하나에 담는다
+    CHECK(Effects::usesColorParam(Effects::Type::ColorKeyer));
+    CHECK(!Effects::usesColorParam(Effects::Type::Blur));
+    const int packed = Effects::packColorParam(QColor(210, 90, 60), 24);
+    CHECK(Effects::colorFromParam(packed) == QColor(210, 90, 60));
+    CHECK(Effects::strengthFromParam(packed) == 24);
+    {   // 색 지정 제거: 고른 색만 투명해진다
+        QImage two(40, 20, QImage::Format_ARGB32_Premultiplied);
+        { QPainter p(&two); p.fillRect(0, 0, 20, 20, QColor(210, 90, 60)); p.fillRect(20, 0, 20, 20, QColor(40, 90, 200)); }
+        const QImage k = Effects::apply(two, {Effects::Type::ColorKeyer, packed});
+        CHECK(qAlpha(k.pixel(5, 10)) == 0);
+        CHECK(qAlpha(k.pixel(30, 10)) == 255);
+        const QImage r = Effects::apply(two, {Effects::Type::ColorRange, packed});
+        CHECK(qAlpha(r.pixel(5, 10)) == 255);          // 범위만 남기기는 반대
+        CHECK(qAlpha(r.pixel(30, 10)) == 0);
+    }
+    {   // 부풀리기·깎기
+        QImage sq(60, 60, QImage::Format_ARGB32_Premultiplied);
+        sq.fill(Qt::transparent);
+        { QPainter p(&sq); p.fillRect(20, 20, 20, 20, Qt::black); }
+        auto area = [](const QImage& im) {
+            int n = 0;
+            for (int y = 0; y < im.height(); ++y)
+                for (int x = 0; x < im.width(); ++x) n += qAlpha(im.pixel(x, y)) > 128;
+            return n;
+        };
+        CHECK(area(Effects::apply(sq, {Effects::Type::Dilate, 4})) > area(sq));
+        CHECK(area(Effects::apply(sq, {Effects::Type::Erode, 4})) < area(sq));
+    }
+    {   // 점선으로 끊기: 줄이 끊어진다
+        QImage line(80, 10, QImage::Format_ARGB32_Premultiplied);
+        line.fill(Qt::black);
+        const QImage d = Effects::apply(line, {Effects::Type::Dashes, 8});
+        int runs = 0;
+        bool in = false;
+        for (int x = 0; x < 80; ++x) {
+            const bool on = qAlpha(d.pixel(x, 5)) > 128;
+            if (on && !in) ++runs;
+            in = on;
+        }
+        CHECK(runs >= 4);
+    }
     // 흰색 제거: 배경 알파 0, 빨간 사각형은 유지
     const QImage k = Effects::apply(im, {Effects::Type::KeyWhite, 20});
     CHECK(qAlpha(k.pixel(2, 2)) == 0);
@@ -1066,6 +1110,143 @@ static void testPlugins(MainWindow& w) {
     CHECK(!Plugins::removePlugin("myplug").isEmpty());
 }
 
+static void testVectorTools(MainWindow& w) {
+    Document* d = w.document();
+    CanvasWidget* c = w.canvas();
+    d->newProject(QSize(200, 160), 4, 12);
+    c->zoomActual();
+    c->clearSelection();
+    c->setGuides(CanvasWidget::Guides());
+    c->setSymmetry(CanvasWidget::Symmetry());
+    d->setVectorLayer(0, true);
+    // 획 두 개를 넣는다
+    VecStroke s1, s2;
+    s1.pts = {QPointF(20, 40), QPointF(100, 40), QPointF(180, 40)};
+    s1.pressure = {1, 1, 1};
+    s1.width = 6;
+    s1.color = Qt::black;
+    s2.pts = {QPointF(20, 120), QPointF(180, 120)};
+    s2.pressure = {1, 1};
+    s2.width = 6;
+    s2.color = Qt::red;
+    d->setVectorStrokes(0, 0, {s1, s2});
+    CHECK(d->vectorStrokeCount(0, 0) == 2);
+    c->setTool(CanvasWidget::Tool::Select);
+    CHECK(c->selectedVectorStroke() == -1);
+    // 획 위를 클릭하면 그 획이 골라진다
+    QTest::mouseClick(c, Qt::LeftButton, {}, imgToWidget(c, d, {60, 40}));
+    CHECK(c->selectedVectorStroke() == 0);
+    QTest::mouseClick(c, Qt::LeftButton, {}, imgToWidget(c, d, {100, 120}));
+    CHECK(c->selectedVectorStroke() == 1);
+    // 빈 곳을 누르면 선택이 풀린다
+    QTest::mouseClick(c, Qt::LeftButton, {}, imgToWidget(c, d, {10, 10}));
+    CHECK(c->selectedVectorStroke() == -1);
+    // Ctrl+클릭: 선 위에 점을 넣는다
+    QTest::mouseClick(c, Qt::LeftButton, Qt::ControlModifier, imgToWidget(c, d, {140, 40}));
+    CHECK(d->vectorStrokes(0, 0)->at(0).pts.size() == 4);
+    CHECK(c->selectedVectorStroke() == 0);
+    // Alt+클릭: 점을 지운다
+    QTest::mouseClick(c, Qt::LeftButton, Qt::AltModifier, imgToWidget(c, d, {100, 40}));
+    CHECK(d->vectorStrokes(0, 0)->at(0).pts.size() == 3);
+    // 점이 둘뿐인 획은 점을 못 지운다
+    QTest::mouseClick(c, Qt::LeftButton, {}, imgToWidget(c, d, {100, 120}));
+    QTest::mouseClick(c, Qt::LeftButton, Qt::AltModifier, imgToWidget(c, d, {20, 120}));
+    CHECK(d->vectorStrokes(0, 0)->at(1).pts.size() == 2);
+    // Shift+끌기: 획을 통째로 옮긴다
+    QTest::mousePress(c, Qt::LeftButton, Qt::ShiftModifier, imgToWidget(c, d, {100, 120}));
+    QTest::mouseMove(c, imgToWidget(c, d, {100, 150}));
+    QTest::mouseRelease(c, Qt::LeftButton, Qt::ShiftModifier, imgToWidget(c, d, {100, 150}));
+    CHECK(std::abs(d->vectorStrokes(0, 0)->at(1).pts[0].y() - 150) < 6);
+    CHECK(std::abs(d->vectorStrokes(0, 0)->at(0).pts[0].y() - 40) < 2);   // 다른 획은 그대로
+    // 닫기 + 채우기 (문서 쪽 동작 확인)
+    QVector<VecStroke> v = *d->vectorStrokes(0, 0);
+    v[0].pts = {QPointF(40, 40), QPointF(140, 40), QPointF(140, 100), QPointF(40, 100)};
+    v[0].pressure = {1, 1, 1, 1};
+    v[0].closed = true;
+    v[0].filled = true;
+    v[0].fill = QColor(0, 160, 255);
+    d->setVectorStrokes(0, 0, v);
+    const QImage im = d->keyImage(0, d->keyIndexAt(0, 0));
+    CHECK(qBlue(im.pixel(90, 70)) > 180 && qRed(im.pixel(90, 70)) < 80);   // 안쪽이 채워졌다
+    // 채우기를 끄면 안쪽이 빈다
+    v = *d->vectorStrokes(0, 0);
+    v[0].filled = false;
+    d->setVectorStrokes(0, 0, v);
+    CHECK(qAlpha(d->keyImage(0, d->keyIndexAt(0, 0)).pixel(90, 70)) < 40);
+    // 저장/불러오기에 닫기·채우기가 따라간다
+    v[0].filled = true;
+    v[0].fill = QColor(0, 160, 255);
+    d->setVectorStrokes(0, 0, v);
+    CHECK(d->saveCopy("/tmp/demo/vec2.ony"));
+    Document e;
+    CHECK(e.load("/tmp/demo/vec2.ony"));
+    CHECK(e.vectorStrokes(0, 0)->at(0).closed && e.vectorStrokes(0, 0)->at(0).filled);
+    CHECK(e.vectorStrokes(0, 0)->at(0).fill == QColor(0, 160, 255));
+    c->setSelectedVectorStroke(-1);
+    d->newProject(QSize(120, 90), 4, 12);
+}
+
+static void testBoneWarp() {
+    // 가로로 긴 막대를 그려 놓고, 오른쪽 끝 뼈를 아래로 내리면 그쪽이 따라 내려온다
+    QImage bar(200, 160, QImage::Format_ARGB32_Premultiplied);
+    bar.fill(Qt::transparent);
+    { QPainter p(&bar); p.fillRect(20, 70, 160, 20, Qt::black); }
+    QVector<Warp::Bone> bones;
+    Warp::Bone b;
+    b.a = QPointF(30, 80);
+    b.b = QPointF(170, 80);
+    b.da = b.a;
+    b.db = b.b;
+    b.radius = 70;
+    bones.push_back(b);
+    // 자세를 안 바꾸면 그대로다
+    const QImage same = Warp::boneWarp(bar, bones);
+    CHECK(qAlpha(same.pixel(100, 80)) > 200);
+    CHECK(qAlpha(same.pixel(100, 130)) < 40);
+    // 끝점을 아래로 내린다
+    bones[0].db = QPointF(170, 130);
+    const QImage bent = Warp::boneWarp(bar, bones);
+    auto colFilled = [](const QImage& im, int x) {
+        int top = -1, bottom = -1;
+        for (int y = 0; y < im.height(); ++y)
+            if (qAlpha(im.pixel(x, y)) > 128) {
+                if (top < 0) top = y;
+                bottom = y;
+            }
+        return QPair<int, int>(top, bottom);
+    };
+    const auto left = colFilled(bent, 40), right = colFilled(bent, 160);
+    CHECK(left.first >= 0 && right.first >= 0);
+    CHECK(right.first > left.first + 15);          // 오른쪽이 아래로 내려갔다
+    // 점 하나가 어디로 가는지도 맞는다
+    const QPointF moved = Warp::boneMapPoint(bones, QPointF(170, 80));
+    CHECK(std::abs(moved.y() - 130) < 12);
+    const QPointF near0 = Warp::boneMapPoint(bones, QPointF(30, 80));
+    CHECK(std::abs(near0.y() - 80) < 12);          // 고정한 쪽은 거의 안 움직인다
+    // 범위 밖은 움직이지 않는다
+    const QPointF far = Warp::boneMapPoint(bones, QPointF(100, 5));
+    CHECK(std::abs(far.y() - 5) < 2 && std::abs(far.x() - 100) < 2);
+    // 뼈가 없으면 그대로
+    CHECK(Warp::boneWarp(bar, {}).size() == bar.size());
+    CHECK(Warp::boneMapPoint({}, QPointF(10, 20)) == QPointF(10, 20));
+    // 뼈 두 개로 가운데를 접는다
+    QVector<Warp::Bone> two;
+    Warp::Bone l1, l2;
+    l1.a = l1.da = QPointF(30, 80);
+    l1.b = l1.db = QPointF(100, 80);
+    l1.radius = 50;
+    l2.a = QPointF(100, 80);
+    l2.b = QPointF(170, 80);
+    l2.da = QPointF(100, 80);
+    l2.db = QPointF(130, 30);
+    l2.radius = 50;
+    two << l1 << l2;
+    const QImage folded = Warp::boneWarp(bar, two);
+    CHECK(folded.size() == bar.size());
+    const auto midCol = colFilled(folded, 45);
+    CHECK(midCol.first >= 0 && std::abs(midCol.first - 70) < 20);   // 왼쪽은 그대로
+}
+
 static void testCompositeRegion() {
     Document d;
     d.newProject(QSize(120, 90), 3, 12);
@@ -1265,6 +1446,56 @@ static void testVectorLayer(MainWindow& w) {
     QTest::mousePress(c, Qt::LeftButton, {}, imgToWidget(c, d, {10, 10}));
     QTest::mouseRelease(c, Qt::LeftButton, {}, imgToWidget(c, d, {40, 40}));
     CHECK(d->vectorStrokeCount(0, 0) == 0);
+}
+
+// George(TVPaint 스크립트) 호환 부분: 수학 함수, do…until, tv_ 이름, $result
+static void testGeorgeScript(MainWindow& w) {
+    Document* d = w.document();
+    d->newProject(QSize(60, 40), 8, 12);
+    ScriptEngine e(d);
+    e.run("set a = sqrt(16) + pow(2,3) + floor(2.7) + ceil(2.1) + round(2.5) + sign(-9)");
+    CHECK(std::abs(e.var("a") - (4 + 8 + 2 + 3 + 3 - 1)) < 1e-9);   // = 19
+    e.run("set t = tan(0)\nset s = asin(0) + acos(1) + atan(0)");
+    CHECK(std::abs(e.var("t")) < 1e-9 && std::abs(e.var("s")) < 1e-9);
+    e.run("set q = atan(1,1)");                      // atan2 → pi/4
+    CHECK(std::abs(e.var("q") - 0.7853981633974483) < 1e-9);
+    e.run("set p = pi\nset l = log(exp(2))");
+    CHECK(std::abs(e.var("p") - 3.14159265358979) < 1e-9 && std::abs(e.var("l") - 2) < 1e-9);
+    // Rnd 는 범위 안에 있어야 한다
+    for (int i = 0; i < 20; ++i) {
+        e.run("set r = rnd(3,6)");
+        CHECK(e.var("r") >= 3 && e.var("r") <= 6);
+    }
+    e.run("set r2 = rnd(5)");
+    CHECK(e.var("r2") >= 0 && e.var("r2") <= 5);
+
+    // do … until: 한 번은 꼭 돌고, 조건이 참이 되면 멈춘다
+    e.run("set n = 0\ndo\nset n = $n + 1\nuntil $n >= 4");
+    CHECK(std::abs(e.var("n") - 4) < 1e-9);
+    e.run("set m = 9\ndo\nset m = $m + 1\nuntil 1");
+    CHECK(std::abs(e.var("m") - 10) < 1e-9);          // 조건이 이미 참이어도 한 번은 돈다
+    // do 블록이 if 안에 있어도 짝이 맞는다
+    e.run("set k = 0\nif 1\ndo\nset k = $k + 1\nuntil $k >= 3\nend\nset k = $k + 100");
+    CHECK(std::abs(e.var("k") - 103) < 1e-9);
+
+    // tv_ 이름과 따옴표
+    const int before = d->layerCount();
+    e.run("tv_LayerCreate \"배경 레이어\"");
+    CHECK(d->layerCount() == before + 1);
+    CHECK(d->layer(d->currentLayer()).name.contains(QStringLiteral("배경 레이어")));
+    e.run("TV_LayerImage 5");                          // 대소문자를 가리지 않는다
+    CHECK(d->currentFrame() == 4);
+    e.run("tv_FrameRate 12");
+    CHECK(d->fps() == 12);
+    e.run("tv_ClearLayer");                            // 이름만 바뀌고 동작은 clear 와 같다
+
+    // $result: 바로 앞 명령의 결과
+    const QString log = e.run("tv_Version\necho 앞 결과는 $result");
+    CHECK(log.contains(QStringLiteral("앞 결과는 ONY")));
+
+    // 모르는 tv_ 명령은 조용히 넘어가지 않고 알려 준다
+    const QString bad = e.run("tv_NoSuchCommand 1 2");
+    CHECK(bad.contains(QStringLiteral("알 수 없는 명령")));
 }
 
 static void testScriptEngine(MainWindow& w) {
@@ -1631,6 +1862,130 @@ static void testRenderPrintPublish(MainWindow& w) {
     CHECK(d->renderSize() == QSize(320, 200));    // 새 프로젝트는 렌더 카메라가 꺼진다
 }
 
+// 프리/포스트 비헤이비어 네 가지와, 내용 범위 밖에 그릴 때 새 이미지가 생기는지
+// 입 모양(립싱크) 분해와, 소리까지 묶어서 저장하기
+static void testLipSyncAndPack() {
+    using namespace LipSync;
+    // 한글: ㅁ·ㅂ·ㅍ 는 A, ㅏ 는 D, ㅗ 는 E, ㅜ 는 F, ㅣ 는 B
+    CHECK(fromText(QStringLiteral("마")) == QVector<int>({A, D}));
+    CHECK(fromText(QStringLiteral("보")) == QVector<int>({A, E}));
+    CHECK(fromText(QStringLiteral("무")) == QVector<int>({A, F}));
+    CHECK(fromText(QStringLiteral("시")) == QVector<int>({B, B}));
+    CHECK(fromText(QStringLiteral("하")) == QVector<int>({G, D}));
+    CHECK(fromText(QStringLiteral("아")) == QVector<int>({D}));          // ㅇ 은 모음에 맡긴다
+    CHECK(fromText(QStringLiteral("밤")).last() == A);                    // 받침 ㅁ 은 입을 다문다
+    // 띄어쓰기는 쉼(X), 끝의 쉼은 떼어 낸다
+    const QVector<int> two = fromText(QStringLiteral("가 나"));
+    CHECK(two.contains(X) && two.last() != X);
+    // 영문
+    CHECK(fromText(QStringLiteral("MA")) == QVector<int>({A, D}));
+    CHECK(fromText(QStringLiteral("FO")) == QVector<int>({G, E}));
+    // 같은 입이 세 번 넘게 이어지지 않는다
+    const QVector<int> run = fromText(QStringLiteral("aaaaaa"));
+    CHECK(run.size() == 2);
+    CHECK(toCodes(QVector<int>({A, D, X})) == QStringLiteral("ADX"));
+    CHECK(fromText(QString()).isEmpty());
+    for (int p = 0; p < Count; ++p) CHECK(!label(p).isEmpty() && code(p).size() == 1);
+
+    // 묶어서 저장: 소리 파일이 프로젝트 옆 _files 폴더로 따라간다
+    QTemporaryDir dir;
+    CHECK(dir.isValid());
+    const QString wav = dir.filePath("소리.wav");
+    {
+        QFile f(wav);
+        CHECK(f.open(QIODevice::WriteOnly));
+        f.write(QByteArray(512, '\0'));
+    }
+    Document d;
+    d.newProject(QSize(20, 20), 4, 12);
+    d.setAudioPath(wav);
+    CHECK(d.audioPath() == wav);
+    const QString packed = dir.filePath("나간곳/작품.ony");
+    QString report;
+    CHECK(d.packTo(packed, &report));
+    CHECK(QFile::exists(packed));
+    CHECK(QFile::exists(dir.filePath("나간곳/작품_files/소리.wav")));
+    CHECK(d.audioPath() == wav);          // 열려 있는 프로젝트의 경로는 그대로
+    CHECK(report.contains(QStringLiteral("1개")));
+
+    // 원본 소리를 지우고 열어도, 묶음 폴더에서 다시 찾아 준다
+    Document e;
+    CHECK(e.load(packed));
+    CHECK(QFile::exists(e.audioPath()));
+    CHECK(e.audioPath().contains(QStringLiteral("작품_files")));
+}
+
+static void testFrameBehavior() {
+    Document d;
+    d.newProject(QSize(20, 20), 10, 12);
+    auto mk = [&](int v) {
+        QImage im(20, 20, QImage::Format_ARGB32_Premultiplied);
+        im.fill(QColor(v, v, v, 255));
+        return im;
+    };
+    // 키 이미지 3장: 2, 3, 4 번 프레임
+    d.pushKeyEdit(0, 2, QImage(), mk(10), "a");
+    d.pushKeyEdit(0, 3, QImage(), mk(20), "b");
+    d.pushKeyEdit(0, 4, QImage(), mk(30), "c");
+    CHECK(d.firstKey(0) == 2 && d.lastKey(0) == 4);
+    CHECK(d.contentEnd(0) == 5);   // 내용은 5번 프레임 앞에서 끝난다
+
+    // 내용 안쪽은 비헤이비어와 상관없이 그대로
+    CHECK(d.resolveKey(0, 2) == 2 && d.resolveKey(0, 3) == 3 && d.resolveKey(0, 4) == 4);
+
+    // 포스트: 유지(3) — 기본값. 마지막 이미지가 계속 보인다
+    d.layer(0).postBehavior = 3;
+    CHECK(d.resolveKey(0, 5) == 4 && d.resolveKey(0, 9) == 4);
+    // 포스트: 없음(0) — 마지막 이미지 뒤는 빈다
+    d.layer(0).postBehavior = 0;
+    CHECK(d.resolveKey(0, 5) == -1 && d.resolveKey(0, 9) == -1);
+    // 포스트: 루프(1) — 2,3,4 가 되풀이된다
+    d.layer(0).postBehavior = 1;
+    CHECK(d.resolveKey(0, 5) == 2 && d.resolveKey(0, 6) == 3 && d.resolveKey(0, 7) == 4 && d.resolveKey(0, 8) == 2);
+    // 포스트: 핑퐁(2) — 2,3,4,3,2,3,4 …
+    d.layer(0).postBehavior = 2;
+    CHECK(d.resolveKey(0, 5) == 3 && d.resolveKey(0, 6) == 2 && d.resolveKey(0, 7) == 3 && d.resolveKey(0, 8) == 4);
+
+    // 프리: 없음(0) 이 기본, 첫 이미지 앞은 빈다
+    CHECK(d.layer(0).preBehavior == 0);
+    CHECK(d.resolveKey(0, 0) == -1 && d.resolveKey(0, 1) == -1);
+    d.layer(0).preBehavior = 3;   // 유지 → 첫 이미지가 앞으로 뻗는다
+    CHECK(d.resolveKey(0, 0) == 2 && d.resolveKey(0, 1) == 2);
+    d.layer(0).preBehavior = 1;   // 루프
+    CHECK(d.resolveKey(0, 1) == 4 && d.resolveKey(0, 0) == 3);
+    d.layer(0).preBehavior = 0;
+
+    // 레이어 끝을 직접 정하면 그 자리가 내용의 끝이 된다
+    d.layer(0).endFrame = 4;
+    CHECK(d.contentEnd(0) == 4);
+    d.layer(0).postBehavior = 3;
+    CHECK(d.resolveKey(0, 4) == 3);   // 4번은 이제 범위 밖 → 유지로 3번 그림
+    d.layer(0).endFrame = -1;
+
+    // 마지막 이미지 뒤에 그리면 유지되던 그림을 고치지 않고 새 이미지가 생긴다
+    CHECK(d.newImagePastEnd());
+    QImage* ed = d.editableImage(0, 7);
+    CHECK(ed && !d.keyImage(0, 7).isNull());
+    CHECK(d.lastKey(0) == 7 && d.contentEnd(0) == 8);
+    CHECK(qRed(d.keyImage(0, 4).pixel(0, 0)) == 30);   // 4번 그림은 그대로
+
+    // 끄면 예전처럼 유지되던 이미지를 그대로 고친다
+    Document e;
+    e.newProject(QSize(20, 20), 10, 12);
+    e.pushKeyEdit(0, 2, QImage(), mk(10), "a");
+    e.setNewImagePastEnd(false);
+    e.editableImage(0, 6);
+    CHECK(e.keyImage(0, 6).isNull() && e.lastKey(0) == 2);
+
+    // 내용 안쪽의 홀드 칸은 늘 유지되던 이미지를 고친다 (새 이미지를 만들지 않는다)
+    Document f;
+    f.newProject(QSize(20, 20), 10, 12);
+    f.pushKeyEdit(0, 1, QImage(), mk(10), "a");
+    f.pushKeyEdit(0, 5, QImage(), mk(20), "b");
+    f.editableImage(0, 3);
+    CHECK(f.keyImage(0, 3).isNull() && f.keyIndexAt(0, 3) == 1);
+}
+
 static void testFrameEditing() {
     Document d;
     d.newProject(QSize(40, 40), 8, 12);
@@ -1834,6 +2189,45 @@ static void testGradientTextSymmetry(MainWindow& w) {
     d->undoStack()->undo();
 }
 
+// 참조 이미지: 캔버스에 비쳐 보이되 그림에는 섞이지 않는다
+static void testReferenceImage(MainWindow& w) {
+    Document* d = w.document();
+    CanvasWidget* c = w.canvas();
+    d->newProject(QSize(80, 60), 3, 12);
+    c->zoomActual();
+    c->clearReference();
+    CHECK(!c->hasReference());
+    const QImage clean = c->grab().toImage();
+
+    QImage ref(80, 60, QImage::Format_ARGB32_Premultiplied);
+    ref.fill(QColor(255, 0, 0, 255));
+    c->setReferenceName(QStringLiteral("빨강.png"));
+    c->setReference(ref);
+    c->setReferenceOnTop(true);
+    c->setReferenceOpacity(1.0);
+    CHECK(c->hasReference() && c->referenceName() == QStringLiteral("빨강.png"));
+    const QImage over = c->grab().toImage();
+    CHECK(over != clean);                       // 화면에는 보인다
+
+    // 그림(키 이미지)에는 섞이지 않는다
+    CHECK(d->keyIndexAt(0, 0) < 0 || d->keyImage(0, 0).isNull() ||
+          qRed(d->keyImage(0, 0).pixel(40, 30)) != 255 || qAlpha(d->keyImage(0, 0).pixel(40, 30)) == 0);
+    // 저장한 프레임에도 들어가지 않는다
+    const QImage flat = d->composite(0, true, false);
+    CHECK(qAlpha(flat.pixel(40, 30)) == 0 || qRed(flat.pixel(40, 30)) != 255 || qGreen(flat.pixel(40, 30)) != 0);
+
+    // 진하기 0 이면 안 보인다
+    c->setReferenceOpacity(0.0);
+    CHECK(c->grab().toImage() == clean);
+    // 뒤에 깔기로 바꿔도 깨지지 않는다
+    c->setReferenceOpacity(0.6);
+    c->setReferenceOnTop(false);
+    CHECK(!c->grab().toImage().isNull());
+    c->clearReference();
+    CHECK(!c->hasReference());
+    CHECK(c->grab().toImage() == clean);
+}
+
 static void testRulerGuides(MainWindow& w) {
     Document* d = w.document();
     CanvasWidget* c = w.canvas();
@@ -1999,10 +2393,16 @@ static void testCanvas(MainWindow& w) {
     CHECK(d->undoStack()->count() == cnt);
     d->layer(0).locked = false;
 
-    // 다른 프레임에 그리면 새 키가 생긴다
+    // 마지막 이미지 뒤의 프레임에 그리면 그 자리에 새 이미지가 생긴다 (TVPaint 방식)
     d->setCurrentFrame(5);
     QTest::mouseClick(c, Qt::LeftButton, {}, imgToWidget(c, d, {5, 5}));
-    CHECK(d->keyIndexAt(0, 5) == 0);  // 프레임 0 의 키가 홀드 중이므로 같은 이미지를 편집(TVPaint 방식)
+    CHECK(d->keyIndexAt(0, 5) == 5);
+    CHECK(qAlpha(d->keyImage(0, 0).pixel(5, 5)) == 0);   // 0 번 그림은 건드리지 않는다
+
+    // 내용 안쪽의 홀드 칸에 그리면 유지되던 이미지를 그대로 고친다
+    d->setCurrentFrame(3);
+    QTest::mouseClick(c, Qt::LeftButton, {}, imgToWidget(c, d, {7, 7}));
+    CHECK(d->keyIndexAt(0, 3) == 0);
 }
 
 int main(int argc, char** argv) {
@@ -2059,19 +2459,25 @@ int main(int argc, char** argv) {
         }
         w.grab().save("/tmp/demo/10_clips.png");
     }
+    testLipSyncAndPack();
+    testFrameBehavior();
     testFrameEditing();
     testNestedFolders();
     testSelectAndPick(w);
     testGradientTextSymmetry(w);
+    testReferenceImage(w);
     testRulerGuides(w);
     testRecorder(w);
     testPaletteAndKeyProfile(w);
     testCollab();
     testPlugins(w);
+    testVectorTools(w);
+    testBoneWarp();
     testCompositeRegion();
     testInbetween();
     testVectorLayer(w);
     testScriptEngine(w);
+    testGeorgeScript(w);
     testLibraryAndPanel();
     testDemo5Basics(w);
     testPsdRoundTrip();

@@ -12,6 +12,7 @@
 #include "Brush.h"
 #include "CanvasWidget.h"
 #include "Extras.h"
+#include "Warp.h"
 #include "Plugins.h"
 #include "MorePanels.h"
 
@@ -109,6 +110,9 @@ private:
     void renderCameraDialog();
     void vectorEditDialog(int kind);
     void inbetweenDialog();
+    void lipSyncDialog();
+    void referenceDialog();
+    void boneWarpDialog();
     void checkCollabOnOpen(const QString& path);
     void collabDialog();
     void releaseCollabLock();
@@ -192,6 +196,7 @@ private:
     QAction* recAct_ = nullptr;
     QAction* symAct_ = nullptr;
     FrameClip frameClip_;
+    QVector<Warp::Bone> boneRig_;
     bool frameAllLayers_ = false;
     QStringList lastPublishErrors_;
     class QTimer* autosaveTimer_ = nullptr;
@@ -200,6 +205,10 @@ private:
     QList<HistEntry> history_;
     QMediaPlayer* player_ = nullptr;
     QAudioOutput* audioOut_ = nullptr;
+    // 소리 스크럽: 재생 중이 아닐 때 프레임을 옮기면 그 자리 소리를 짧게 들려준다
+    bool audioScrub_ = true;
+    QTimer scrubStop_;
+    void scrubAudioAt(int frame);
     // 서랍 자동 숨김
     QTimer drawerTimer_;
     bool leftLocked_ = true, rightLocked_ = true;

@@ -17,6 +17,7 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia)
 find_package(Qt6 OPTIONAL_COMPONENTS Test PrintSupport)
 
 add_library(tvpcore STATIC
+    src/LipSync.cpp
     src/Document.h src/Document.cpp
     src/Effects.h src/Effects.cpp
     src/Warp.h src/Warp.cpp

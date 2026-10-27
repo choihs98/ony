@@ -45,6 +45,17 @@ public:
     qreal zoom() const { return zoom_; }
     void setBackdrop(const QColor& c) { backdrop_ = c; update(); }
 
+    // 참조 이미지: 캔버스 뒤(또는 위)에 비쳐 보이게 깔아 두는 그림. 그림에는 섞이지 않는다.
+    void setReference(const QImage& img) { ref_ = img; cacheDirty_ = true; update(); }
+    void clearReference() { ref_ = QImage(); cacheDirty_ = true; update(); }
+    bool hasReference() const { return !ref_.isNull(); }
+    QString referenceName() const { return refName_; }
+    void setReferenceName(const QString& n) { refName_ = n; }
+    double referenceOpacity() const { return refOpacity_; }
+    void setReferenceOpacity(double v) { refOpacity_ = std::clamp(v, 0.0, 1.0); update(); }
+    bool referenceOnTop() const { return refOnTop_; }
+    void setReferenceOnTop(bool on) { refOnTop_ = on; cacheDirty_ = true; update(); }
+
     // 가이드라인 오버레이
     struct Guides {
         bool grid = false;
@@ -97,6 +108,8 @@ public:
     void setSelectionMask(const QImage& mask);          // 마스크로 선택 지정 (빈 이미지 = 해제)
     void setSelectionRect(const QRect& r);              // 사각형 선택 지정
     void invertSelection();
+    int selectedVectorStroke() const { return vecSel_; }
+    void setSelectedVectorStroke(int i);
     void growSelection(int px);      // 양수 = 키우기, 음수 = 줄이기
     void featherSelection(int px);   // 가장자리 부드럽게
     bool selectionFeathered() const { return selValid_ && selFeathered_; }
@@ -146,6 +159,7 @@ signals:
     void cursorMoved(int x, int y);
     void colorPicked(const QColor& c);
     void selectionChanged();
+    void vectorStrokeSelected(int index);
     void zoomChanged(qreal zoom);
     void message(const QString& text);
     void strokeFinished();
@@ -170,6 +184,10 @@ private:
     bool recActive_ = false;
     QElapsedTimer recClock_;
     QColor backdrop_{0x2d, 0x31, 0x36};
+    QImage ref_;
+    QString refName_;
+    double refOpacity_ = 0.5;
+    bool refOnTop_ = false;
     QImage stencilMask_;
     QHash<quint64, QImage> ltCache_;   // 라이트 테이블 색 입힌 그림 캐시
     QImage ltOverlay_;                 // 겹쳐 둔 라이트 테이블 한 장
@@ -269,6 +287,12 @@ private:
     QVector<float> vecPr_;
     QVector<VecStroke> vecWork_;
     int vecEditStroke_ = -1, vecEditPoint_ = -1;
+    int vecSel_ = -1;          // 고른 획 (-1 = 없음)
+    bool vecMoveWhole_ = false;
+    QPointF vecMoveFrom_;
+    // 벡터 획에서 가장 가까운 점 / 선분을 찾는다
+    int vecHitPoint(const QPointF& ip, int* strokeOut) const;
+    int vecHitStroke(const QPointF& ip, int* segOut = nullptr, QPointF* atOut = nullptr) const;
     QPointF gradStart_, gradEnd_;
     bool grading_ = false;
     QPointF textPos_;

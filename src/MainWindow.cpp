@@ -5,6 +5,7 @@
 #include "MainWindow.h"
 #include "CanvasWidget.h"
 #include "Document.h"
+#include "LipSync.h"
 #include "Extras.h"
 #include "Effects.h"
 #include "Style.h"
@@ -35,6 +36,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
@@ -117,13 +119,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), doc_(new Document
     });
     connect(&playTimer_, &QTimer::timeout, this, &MainWindow::stepPlay);
     playTimer_.setInterval(1000 / doc_->fps());
+    scrubStop_.setSingleShot(true);
+    connect(&scrubStop_, &QTimer::timeout, this, [this] {
+        if (player_ && !playTimer_.isActive()) player_->pause();
+    });
+    connect(doc_, &Document::currentChanged, this, [this] { scrubAudioAt(doc_->currentFrame()); });
 
     auto& SC = Shortcuts::instance();
     SC.add(this, "색상", "A/B 색 바꾸기", QKeySequence(Qt::Key_X), [this] { color_->swapColors(); });
-    SC.add(this, "타임라인", "프레임 추가", QKeySequence(Qt::CTRL | Qt::Key_Insert), [this] {
-        doc_->insertFrame(doc_->currentFrame() + 1);
-        gotoFrame(doc_->currentFrame() + 1);
-    });
     SC.add(this, "타임라인", "이전 프레임", QKeySequence(Qt::Key_Left), [this] { gotoFrame(doc_->currentFrame() - 1); });
     SC.add(this, "타임라인", "다음 프레임", QKeySequence(Qt::Key_Right), [this] { nextFrameAction(false); });
     SC.add(this, "타임라인", "다음 이미지 (새 이미지 만들기)", QKeySequence("Shift+Right"), [this] { nextFrameAction(true); });
@@ -144,6 +147,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), doc_(new Document
     }
     setupAutosave();
     collabOn_ = QSettings("Ony", "Ony").value("collab/on", false).toBool();
+    doc_->setNewImagePastEnd(QSettings("Ony", "Ony").value("anim/newImagePastEnd", true).toBool());
+    audioScrub_ = QSettings("Ony", "Ony").value("anim/audioScrub", true).toBool();
     statusBar()->showMessage(QStringLiteral("준비"));
 }
 
@@ -1144,13 +1149,344 @@ void MainWindow::vectorEditDialog(int kind) {
         if (QMessageBox::question(this, "획 지우기", "이 프레임의 벡터 획을 모두 지울까요?") != QMessageBox::Yes) return;
         s.clear();
         break;
-    default:
-        return;
+    default: {
+        // 5 이상은 "고른 획" 에 대한 명령
+        const int i = canvas_->selectedVectorStroke();
+        if (i < 0 || i >= s.size()) {
+            statusBar()->showMessage(QStringLiteral("먼저 선택 도구로 획을 고르세요 (획 위를 클릭)."), 5000);
+            return;
+        }
+        switch (kind) {
+        case 5:
+            s[i].closed = !s[i].closed;
+            statusBar()->showMessage(s[i].closed ? QStringLiteral("획을 닫았습니다.") : QStringLiteral("획을 열었습니다."), 3000);
+            break;
+        case 6: {
+            const QColor c = QColorDialog::getColor(s[i].fill.alpha() ? s[i].fill : color_->colorA(), this, "안쪽 채울 색");
+            if (!c.isValid()) return;
+            s[i].fill = c;
+            s[i].filled = true;
+            s[i].closed = true;
+            break;
+        }
+        case 7:
+            s[i].filled = false;
+            break;
+        case 8: {
+            bool ok = false;
+            const int v = QInputDialog::getInt(this, "획 굵기", "굵기 (px, 0 = 선 없이 채우기만):", int(s[i].width), 0, 400, 1, &ok);
+            if (!ok) return;
+            s[i].width = v;
+            break;
+        }
+        case 9: {
+            const QColor c = QColorDialog::getColor(s[i].color, this, "획 색");
+            if (!c.isValid()) return;
+            s[i].color = c;
+            break;
+        }
+        case 10: {
+            const VecStroke v = s.takeAt(i);
+            s.push_back(v);
+            canvas_->setSelectedVectorStroke(s.size() - 1);
+            break;
+        }
+        case 11: {
+            const VecStroke v = s.takeAt(i);
+            s.prepend(v);
+            canvas_->setSelectedVectorStroke(0);
+            break;
+        }
+        case 12: {
+            // 점을 가운데로 조금씩 당겨 매끄럽게 한다
+            VecStroke& v = s[i];
+            if (v.pts.size() >= 3) {
+                QVector<QPointF> out = v.pts;
+                for (int k = 1; k + 1 < v.pts.size(); ++k) out[k] = (v.pts[k - 1] + v.pts[k] * 2.0 + v.pts[k + 1]) / 4.0;
+                v.pts = out;
+            }
+            break;
+        }
+        case 13: {
+            VecStroke v = s[i];
+            for (QPointF& pt : v.pts) pt += QPointF(8, 8);
+            s.push_back(v);
+            canvas_->setSelectedVectorStroke(s.size() - 1);
+            break;
+        }
+        case 14:
+            s.remove(i);
+            canvas_->setSelectedVectorStroke(-1);
+            break;
+        case 15: {
+            if (i + 1 >= s.size()) {
+                statusBar()->showMessage(QStringLiteral("이을 다음 획이 없습니다."), 4000);
+                return;
+            }
+            VecStroke& a = s[i];
+            const VecStroke& b = s[i + 1];
+            a.pts += b.pts;
+            a.pressure += b.pressure;
+            s.remove(i + 1);
+            statusBar()->showMessage(QStringLiteral("획 두 개를 이었습니다."), 4000);
+            break;
+        }
+        default:
+            return;
+        }
+        break;
+    }
     }
     doc_->setVectorStrokes(l, f, s);
 }
 
 // 두 키 사이를 자동으로 채운다
+// 뼈대(본)로 그림을 휘게 한다. 퍼펫 레이어면 그 레이어의 뼈대를 기억해 둔다.
+void MainWindow::boneWarpDialog() {
+    const int l = doc_->currentLayer(), k = doc_->keyIndexAt(l, doc_->currentFrame());
+    if (k < 0 || doc_->layer(l).locked) {
+        statusBar()->showMessage(QStringLiteral("현재 프레임에 편집할 이미지가 없거나 레이어가 잠겼습니다."), 4000);
+        return;
+    }
+    BoneWarpDialog dlg(doc_->keyImage(l, k), this);
+    if (!boneRig_.isEmpty()) dlg.setBones(boneRig_);   // 지난번 뼈대를 이어서 쓴다
+    if (dlg.exec() != QDialog::Accepted) return;
+    boneRig_ = dlg.bones();
+    if (boneRig_.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("뼈를 하나도 놓지 않아 바뀐 것이 없습니다."), 4000);
+        return;
+    }
+    const QImage res = dlg.result();
+    applyEffect("뼈대 변형", [&](const QImage&) { return res; });
+    statusBar()->showMessage(QStringLiteral("뼈대를 기억해 두었습니다. 다음 프레임에서 다시 열면 그대로 이어서 쓸 수 있습니다."), 7000);
+}
+
+// 참조 이미지: 캔버스에 비쳐 보이게 깔아 두는 그림. 그림에는 섞이지 않고 저장에도 들어가지 않는다.
+void MainWindow::referenceDialog() {
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("참조 이미지"));
+    dlg.setMinimumWidth(460);
+    auto* lay = new QVBoxLayout(&dlg);
+    auto* note = new QLabel(QStringLiteral(
+        "모델 시트나 사진을 캔버스에 겹쳐 두고 보면서 그릴 수 있습니다.\n"
+        "참조 이미지는 그림에 섞이지 않고, 프로젝트 파일에도 들어가지 않습니다."));
+    note->setWordWrap(true);
+    lay->addWidget(note);
+
+    auto* which = new QLabel;
+    which->setWordWrap(true);
+    auto updateWhich = [&] {
+        which->setText(canvas_->hasReference()
+                           ? QStringLiteral("지금 쓰는 그림: ") + canvas_->referenceName()
+                           : QStringLiteral("지금 쓰는 그림: (없음)"));
+    };
+    updateWhich();
+    lay->addWidget(which);
+
+    auto* form = new QFormLayout;
+    auto* op = new QSlider(Qt::Horizontal);
+    op->setRange(0, 100);
+    op->setValue(int(canvas_->referenceOpacity() * 100 + 0.5));
+    auto* opVal = new QLabel(QString::number(op->value()) + "%");
+    auto* opRow = new QHBoxLayout;
+    opRow->addWidget(op, 1);
+    opRow->addWidget(opVal);
+    form->addRow(QStringLiteral("진하기"), opRow);
+    auto* onTop = new QCheckBox(QStringLiteral("그림 위에 겹쳐 보기 (끄면 캔버스 뒤에 깔립니다)"));
+    onTop->setChecked(canvas_->referenceOnTop());
+    form->addRow(QString(), onTop);
+    lay->addLayout(form);
+
+    connect(op, &QSlider::valueChanged, &dlg, [this, opVal](int v) {
+        opVal->setText(QString::number(v) + "%");
+        canvas_->setReferenceOpacity(v / 100.0);
+    });
+    connect(onTop, &QCheckBox::toggled, &dlg, [this](bool on) { canvas_->setReferenceOnTop(on); });
+
+    auto* row = new QHBoxLayout;
+    auto* load = new QPushButton(QStringLiteral("그림 불러오기..."));
+    auto* clear = new QPushButton(QStringLiteral("치우기"));
+    row->addWidget(load);
+    row->addWidget(clear);
+    row->addStretch();
+    lay->addLayout(row);
+    connect(load, &QPushButton::clicked, &dlg, [this, updateWhich] {
+        const QString p = QFileDialog::getOpenFileName(
+            this, QStringLiteral("참조 이미지 불러오기"), QString(),
+            QStringLiteral("이미지 (*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff);;모든 파일 (*)"));
+        if (p.isEmpty()) return;
+        QImage img(p);
+        if (img.isNull()) {
+            QMessageBox::warning(this, QStringLiteral("참조 이미지"), QStringLiteral("이 그림을 읽지 못했습니다."));
+            return;
+        }
+        canvas_->setReferenceName(QFileInfo(p).fileName());
+        canvas_->setReference(img);
+        updateWhich();
+    });
+    connect(clear, &QPushButton::clicked, &dlg, [this, updateWhich] {
+        canvas_->setReferenceName(QString());
+        canvas_->clearReference();
+        updateWhich();
+    });
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Close);
+    bb->button(QDialogButtonBox::Close)->setText(QStringLiteral("닫기"));
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    lay->addWidget(bb);
+    dlg.exec();
+}
+
+// 입 모양(립싱크) 맞추기: 대사를 음소 열로 바꾸고, 음소마다 묶어 둔 라이브러리 이미지를 프레임에 깐다
+void MainWindow::lipSyncDialog() {
+    if (doc_->libraryCount() == 0) {
+        QMessageBox::information(
+            this, QStringLiteral("입 모양 맞추기"),
+            QStringLiteral("먼저 입 모양 그림을 이미지 라이브러리에 넣어 주세요.\n\n"
+                           "입 모양을 하나씩 그린 뒤, 이미지 메뉴나 라이브러리 패널의 "
+                           "[현재 이미지 담기] 로 담으면 여기서 고를 수 있습니다."));
+        return;
+    }
+    const int l = doc_->currentLayer();
+    if (doc_->layer(l).locked) {
+        QMessageBox::information(this, QStringLiteral("입 모양 맞추기"), QStringLiteral("잠긴 레이어에는 깔 수 없습니다."));
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("입 모양 맞추기 (립싱크)"));
+    dlg.setMinimumWidth(560);
+    auto* lay = new QVBoxLayout(&dlg);
+
+    auto* intro = new QLabel(QStringLiteral(
+        "대사를 적으면 입 모양 여덟 가지(A~G, X=쉼)로 나눕니다.\n"
+        "각 입 모양에 라이브러리 그림을 묶어 두면, 현재 레이어의 프레임에 차례로 깔아 줍니다."));
+    intro->setWordWrap(true);
+    lay->addWidget(intro);
+
+    auto* text = new QPlainTextEdit;
+    text->setPlaceholderText(QStringLiteral("예) 안녕하세요 반갑습니다"));
+    text->setMaximumHeight(70);
+    lay->addWidget(text);
+
+    auto* preview = new QLabel;
+    preview->setWordWrap(true);
+    preview->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    lay->addWidget(preview);
+
+    auto* form = new QFormLayout;
+    auto* start = new QSpinBox;
+    start->setRange(1, doc_->frameCount());
+    start->setValue(doc_->currentFrame() + 1);
+    auto* per = new QSpinBox;
+    per->setRange(1, 24);
+    per->setValue(2);
+    per->setSuffix(QStringLiteral(" 프레임"));
+    auto* grow = new QCheckBox(QStringLiteral("모자라면 프로젝트 길이를 늘린다"));
+    grow->setChecked(true);
+    auto* keepX = new QCheckBox(QStringLiteral("쉼(X) 자리에도 그림을 깐다"));
+    keepX->setChecked(true);
+    form->addRow(QStringLiteral("시작 프레임"), start);
+    form->addRow(QStringLiteral("입 모양 하나당"), per);
+    form->addRow(QString(), grow);
+    form->addRow(QString(), keepX);
+    lay->addLayout(form);
+
+    // 음소 → 라이브러리 이미지
+    auto* grid = new QFormLayout;
+    QVector<QComboBox*> picks;
+    for (int p = 0; p < LipSync::Count; ++p) {
+        auto* cb = new QComboBox;
+        cb->addItem(QStringLiteral("(없음)"), -1);
+        for (int i = 0; i < doc_->libraryCount(); ++i) {
+            const QString cat = doc_->libraryCategory(i);
+            cb->addItem(cat.isEmpty() ? doc_->libraryName(i) : cat + " / " + doc_->libraryName(i), i);
+        }
+        // 라이브러리 이름이 입 모양 글자로 시작하면 미리 골라 둔다 ("A 다문입" 같은 경우)
+        const QString wanted = LipSync::code(p);
+        for (int i = 0; i < doc_->libraryCount(); ++i) {
+            const QString n = doc_->libraryName(i).trimmed();
+            if (n.startsWith(wanted, Qt::CaseInsensitive) &&
+                (n.size() == wanted.size() || !n[wanted.size()].isLetterOrNumber())) {
+                cb->setCurrentIndex(i + 1);
+                break;
+            }
+        }
+        picks.push_back(cb);
+        grid->addRow(LipSync::label(p), cb);
+    }
+    auto* box = new QGroupBox(QStringLiteral("입 모양에 쓸 그림"));
+    box->setLayout(grid);
+    lay->addWidget(box);
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    bb->button(QDialogButtonBox::Ok)->setText(QStringLiteral("깔기"));
+    bb->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("취소"));
+    lay->addWidget(bb);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    auto refresh = [&] {
+        const QVector<int> seq = LipSync::fromText(text->toPlainText());
+        if (seq.isEmpty()) {
+            preview->setText(QStringLiteral("입 모양: (대사를 적어 주세요)"));
+            return;
+        }
+        const int need = seq.size() * per->value();
+        preview->setText(QStringLiteral("입 모양 %1개 · %2 프레임 필요  →  %3")
+                             .arg(seq.size())
+                             .arg(need)
+                             .arg(LipSync::toCodes(seq)));
+    };
+    connect(text, &QPlainTextEdit::textChanged, &dlg, refresh);
+    connect(per, QOverload<int>::of(&QSpinBox::valueChanged), &dlg, [refresh](int) { refresh(); });
+    refresh();
+
+    if (dlg.exec() != QDialog::Accepted) return;
+    const QVector<int> seq = LipSync::fromText(text->toPlainText());
+    if (seq.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("대사가 비어 있습니다."), 4000);
+        return;
+    }
+    const int s0 = start->value() - 1, step = per->value();
+    const int needEnd = s0 + seq.size() * step;
+    if (needEnd > doc_->frameCount()) {
+        if (!grow->isChecked()) {
+            QMessageBox::information(this, QStringLiteral("입 모양 맞추기"),
+                                     QStringLiteral("프로젝트가 %1 프레임까지 있어야 합니다.").arg(needEnd));
+            return;
+        }
+        doc_->setFrameCount(needEnd);
+    }
+    doc_->undoStack()->beginMacro(QStringLiteral("입 모양 맞추기"));
+    int placed = 0;
+    for (int i = 0; i < seq.size(); ++i) {
+        const int p = seq[i];
+        if (p == LipSync::X && !keepX->isChecked()) continue;
+        const int libIdx = picks[p]->currentData().toInt();
+        if (libIdx < 0) continue;
+        const int f = s0 + i * step;
+        if (f < 0 || f >= doc_->frameCount()) continue;
+        QImage img = doc_->libraryImage(libIdx);
+        if (img.isNull()) continue;
+        if (img.size() != doc_->size()) {
+            QImage fit(doc_->size(), QImage::Format_ARGB32_Premultiplied);
+            fit.fill(Qt::transparent);
+            QPainter q(&fit);
+            q.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            q.drawImage(QRect(QPoint(0, 0), doc_->size()), img);
+            q.end();
+            img = fit;
+        }
+        doc_->pushKeyEdit(l, f, doc_->layer(l).frames[f], img, QStringLiteral("입 모양"));
+        ++placed;
+    }
+    doc_->undoStack()->endMacro();
+    statusBar()->showMessage(
+        QStringLiteral("입 모양 %1개를 %2 프레임부터 깔았습니다 (%3)").arg(placed).arg(s0 + 1).arg(LipSync::toCodes(seq)),
+        6000);
+}
+
 void MainWindow::inbetweenDialog() {
     const int l = doc_->currentLayer();
     const int f = doc_->currentFrame();
@@ -2124,6 +2460,18 @@ void MainWindow::buildMenus() {
     file->addSeparator();
     act(file, "저장", [this] { saveProject(); }, QKeySequence::Save);
     act(file, "다른 이름으로 저장...", [this] { saveProjectAs(); }, QKeySequence::SaveAs);
+    act(file, "묶어서 저장 (소리까지 한 폴더로)...", [this] {
+        const QString p = QFileDialog::getSaveFileName(
+            this, QStringLiteral("묶어서 저장"),
+            doc_->path().isEmpty() ? QString() : QFileInfo(doc_->path()).completeBaseName() + "_묶음.ony",
+            QStringLiteral("ONY 프로젝트 (*.ony)"));
+        if (p.isEmpty()) return;
+        QString report;
+        if (doc_->packTo(p.endsWith(".ony", Qt::CaseInsensitive) ? p : p + ".ony", &report))
+            statusBar()->showMessage(QStringLiteral("묶어서 저장했습니다. ") + report, 6000);
+        else
+            QMessageBox::warning(this, QStringLiteral("묶어서 저장"), report);
+    });
     act(file, "템플릿으로 저장...", [this] {
         bool ok = false;
         const QString n = QInputDialog::getText(this, "템플릿으로 저장", "템플릿 이름:", QLineEdit::Normal, "내 템플릿", &ok);
@@ -2403,6 +2751,19 @@ void MainWindow::buildMenus() {
                                         : QString(), 7000);
         });
         Shortcuts::instance().adopt(vOn, QStringLiteral("레이어"));
+        vm->addSeparator();
+        act(vm, "고른 획: 닫기 / 열기", [this] { vectorEditDialog(5); });
+        act(vm, "고른 획: 안쪽 채우기...", [this] { vectorEditDialog(6); });
+        act(vm, "고른 획: 채우기 끄기", [this] { vectorEditDialog(7); });
+        act(vm, "고른 획: 굵기...", [this] { vectorEditDialog(8); });
+        act(vm, "고른 획: 색...", [this] { vectorEditDialog(9); });
+        act(vm, "고른 획: 맨 앞으로", [this] { vectorEditDialog(10); });
+        act(vm, "고른 획: 맨 뒤로", [this] { vectorEditDialog(11); });
+        act(vm, "고른 획: 부드럽게 (점 고르기)", [this] { vectorEditDialog(12); });
+        act(vm, "고른 획: 복제", [this] { vectorEditDialog(13); });
+        act(vm, "고른 획: 지우기", [this] { vectorEditDialog(14); });
+        act(vm, "획 두 개 잇기 (고른 획 + 다음 획)", [this] { vectorEditDialog(15); });
+        vm->addSeparator();
         act(vm, "획 굵기 한꺼번에 바꾸기...", [this] { vectorEditDialog(0); });
         act(vm, "획 색 한꺼번에 바꾸기...", [this] { vectorEditDialog(1); });
         act(vm, "획 단순화 (점 줄이기)...", [this] { vectorEditDialog(2); });
@@ -2511,6 +2872,50 @@ void MainWindow::buildMenus() {
         if (doc_->layer(l).locked || doc_->layer(l).frames[f].isNull()) return;
         doc_->pushKeyEdit(l, f, doc_->layer(l).frames[f], QImage(), QStringLiteral("키 이미지 지우기"));
     });
+    act(image, "입 모양 맞추기 (립싱크)...", [this] { lipSyncDialog(); }, QKeySequence("Ctrl+Alt+L"));
+    act(image, "프레임 추가 (뒤에 빈 프레임 끼우기)", [this] {
+        doc_->insertFrame(doc_->currentFrame() + 1);
+        gotoFrame(doc_->currentFrame() + 1);
+    }, QKeySequence(Qt::CTRL | Qt::Key_Insert));
+    image->addSeparator();
+
+    // ---- 프레임 비헤이비어: 레이어 내용의 앞뒤를 어떻게 채울지 (타임라인의 작은 단추와 같은 것)
+    {
+        static const char* bnames[] = {"없음", "루프", "핑퐁", "유지"};
+        for (int which = 0; which < 2; ++which) {
+            QMenu* sub = image->addMenu(which == 0 ? "첫 이미지 앞 (프리 비헤이비어)"
+                                                   : "마지막 이미지 뒤 (포스트 비헤이비어)");
+            auto* grp = new QActionGroup(sub);
+            QVector<QAction*> acts;
+            for (int i = 0; i < 4; ++i) {
+                QAction* a = sub->addAction(QString::fromUtf8(bnames[i]));
+                a->setCheckable(true);
+                grp->addAction(a);
+                acts.push_back(a);
+                connect(a, &QAction::triggered, this, [this, which, i] {
+                    Layer& L = doc_->layer(doc_->currentLayer());
+                    (which == 0 ? L.preBehavior : L.postBehavior) = i;
+                    doc_->notifyStructure();
+                });
+            }
+            connect(sub, &QMenu::aboutToShow, sub, [this, which, acts] {
+                const Layer& L = doc_->layer(doc_->currentLayer());
+                const int cur = which == 0 ? L.preBehavior : L.postBehavior;
+                for (int i = 0; i < acts.size(); ++i) acts[i]->setChecked(i == cur);
+            });
+        }
+        QAction* pastEnd = image->addAction("마지막 이미지 뒤에 그리면 새 이미지 만들기");
+        pastEnd->setCheckable(true);
+        pastEnd->setChecked(doc_->newImagePastEnd());
+        pastEnd->setToolTip(QStringLiteral(
+            "켜면 TVPaint 처럼, 유지되고 있는 이미지 뒤의 프레임에 그릴 때 그 자리에 새 이미지가 생깁니다. "
+            "끄면 유지되던 이미지를 그대로 고칩니다."));
+        connect(pastEnd, &QAction::toggled, this, [this](bool on) {
+            doc_->setNewImagePastEnd(on);
+            QSettings("Ony", "Ony").setValue("anim/newImagePastEnd", on);
+        });
+        connect(image, &QMenu::aboutToShow, pastEnd, [this, pastEnd] { pastEnd->setChecked(doc_->newImagePastEnd()); });
+    }
     act(image, "이미지 지우기", [this] { canvas_->clearCurrent(); });
     image->addSeparator();
     act(image, "모든 이미지 선택", [this] { timeline_->setRange(0, doc_->frameCount() - 1); });
@@ -2624,6 +3029,7 @@ void MainWindow::buildMenus() {
     act(image, "변형", [this] { transformDialog(); }, QKeySequence("Ctrl+T"));
     act(image, "원근", [this] { perspectiveDialog(); });
     act(image, "메시 워프 (격자 변형)...", [this] { meshWarpDialog(); }, QKeySequence("Ctrl+Alt+M"));
+    act(image, "뼈대 변형 (본)...", [this] { boneWarpDialog(); }, QKeySequence("Ctrl+Alt+B"));
     act(image, "중간 그림 자동으로 만들기...", [this] { inbetweenDialog(); }, QKeySequence("Ctrl+Alt+I"));
     act(image, "좌우 뒤집기", [this] { applyEffect("좌우 뒤집기", Effects::flipH); });
     act(image, "상하 뒤집기", [this] { applyEffect("상하 뒤집기", Effects::flipV); });
@@ -2650,7 +3056,15 @@ void MainWindow::buildMenus() {
                 Effects::Item item;
                 item.type = t;
                 item.param = pi.def;
-                if (pi.has) {
+                if (Effects::usesColorParam(t)) {
+                    // 색을 고른 뒤 허용 오차를 묻는다
+                    const QColor c = QColorDialog::getColor(color_->colorA(), this, Effects::typeName(t) + " — 색 고르기");
+                    if (!c.isValid()) return;
+                    bool ok = false;
+                    const int tol = QInputDialog::getInt(this, Effects::typeName(t), pi.label, pi.def, pi.lo, pi.hi, 1, &ok);
+                    if (!ok) return;
+                    item.param = Effects::packColorParam(c, tol);
+                } else if (pi.has) {
                     bool ok = false;
                     item.param = QInputDialog::getInt(this, Effects::typeName(t), pi.label, pi.def, pi.lo, pi.hi, 1, &ok);
                     if (!ok) return;
@@ -2678,6 +3092,20 @@ void MainWindow::buildMenus() {
     act(view, "축소", [this] { canvas_->zoomBy(0.8); }, QKeySequence("Ctrl+-"));
     act(view, "화면에 맞춤", [this] { canvas_->zoomFit(); }, QKeySequence("Ctrl+0"));
     act(view, "100%", [this] { canvas_->zoomActual(); }, QKeySequence("Ctrl+1"));
+    view->addSeparator();
+    act(view, "참조 이미지...", [this] { referenceDialog(); }, QKeySequence("Ctrl+Alt+R"));
+    {
+        QAction* sa = view->addAction(QStringLiteral("소리 스크럽 (프레임 옮길 때 소리 듣기)"));
+        sa->setCheckable(true);
+        sa->setChecked(audioScrub_);
+        sa->setToolTip(QStringLiteral("켜면 타임라인에서 프레임을 옮길 때마다 그 자리의 소리를 짧게 들려줍니다."));
+        connect(sa, &QAction::toggled, this, [this](bool on) {
+            audioScrub_ = on;
+            QSettings("Ony", "Ony").setValue("anim/audioScrub", on);
+            if (!on && player_ && !playTimer_.isActive()) player_->pause();
+        });
+        Shortcuts::instance().adopt(sa, view->title());
+    }
     view->addSeparator();
     act(view, "대칭 그리기 설정...", [this] { symmetryDialog(); });
     {
@@ -3558,6 +3986,16 @@ void MainWindow::exportTimesheetPdf() {
 // ---------------------------------------------------------------- 재생
 void MainWindow::gotoFrame(int f) {
     doc_->setCurrentFrame(f);
+}
+
+// 프레임을 옮길 때 그 자리의 소리를 짧게 들려준다 (TVPaint 의 sound scrub)
+void MainWindow::scrubAudioAt(int frame) {
+    if (!audioScrub_ || playTimer_.isActive()) return;
+    if (!player_ || doc_->audioPath().isEmpty() || doc_->masterMuted()) return;
+    const int fps = std::max(1, doc_->fps());
+    player_->setPosition(qint64(frame) * 1000 / fps);
+    player_->play();
+    scrubStop_.start(std::min(200, std::max(60, 1000 / fps)));
 }
 
 void MainWindow::setProxyChoice(int idx) {
