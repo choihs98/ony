@@ -2,6 +2,8 @@
 
 #include <QtGlobal>
 #include <algorithm>
+#include <thread>
+#include <vector>
 #include <cmath>
 
 namespace Blend {
@@ -111,14 +113,16 @@ inline float ch(int mode, float b, float s) { // 채널별 혼합 (b: 아래, s:
 }
 } // namespace
 
-void apply(QImage& dst, const QImage& src, int mode, qreal opacity) {
-    if (dst.size() != src.size()) return;
-    const float op = float(std::clamp(opacity, 0.0, 1.0));
-    const int w = dst.width(), h = dst.height();
-    for (int y = 0; y < h; ++y) {
+// 한 줄씩 섞는다. y0 <= y < y1 만 건드리므로 여러 갈래로 나눠 돌려도 안전하다.
+static void applyRows(QImage& dst, const QImage& src, int mode, float op, int y0, int y1) {
+    const int w = dst.width();
+    for (int y = y0; y < y1; ++y) {
         QRgb* d = reinterpret_cast<QRgb*>(dst.scanLine(y));
         const QRgb* s = reinterpret_cast<const QRgb*>(src.constScanLine(y));
         for (int x = 0; x < w; ++x) {
+            // 레이어가 투명한 자리는 어떤 모드에서도 아래 그림이 그대로 남는다.
+            // 그림은 대개 비어 있는 곳이 많아서, 이 한 줄이 가장 크게 아낀다.
+            if (qAlpha(s[x]) == 0) continue;
             const float sa = qAlpha(s[x]) / 255.f * op;
             const float da = qAlpha(d[x]) / 255.f;
             // 직선(비곱셈) 색
@@ -172,6 +176,30 @@ void apply(QImage& dst, const QImage& src, int mode, qreal opacity) {
                          std::clamp(int(oc.b * oa * 255 + 0.5f), 0, A), A);
         }
     }
+}
+
+void apply(QImage& dst, const QImage& src, int mode, qreal opacity) {
+    if (dst.size() != src.size()) return;
+    const float op = float(std::clamp(opacity, 0.0, 1.0));
+    const int h = dst.height();
+    // 큰 그림은 줄을 나눠 동시에 섞는다. 줄마다 쓰는 자리가 달라서 서로 건드리지 않는다.
+    const int px = dst.width() * h;
+    int n = 1;
+    if (px >= 160000) n = std::clamp(int(std::thread::hardware_concurrency()), 1, 8);
+    if (n <= 1 || h < n * 2) {
+        applyRows(dst, src, mode, op, 0, h);
+        return;
+    }
+    std::vector<std::thread> th;
+    th.reserve(n - 1);
+    const int step = (h + n - 1) / n;
+    for (int i = 1; i < n; ++i) {
+        const int a = std::min(h, i * step), b = std::min(h, a + step);
+        if (a >= b) break;
+        th.emplace_back([&dst, &src, mode, op, a, b] { applyRows(dst, src, mode, op, a, b); });
+    }
+    applyRows(dst, src, mode, op, 0, std::min(h, step));
+    for (auto& t : th) t.join();
 }
 
 } // namespace Blend

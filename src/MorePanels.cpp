@@ -20,6 +20,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
+#include <QEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
@@ -29,34 +30,81 @@
 
 // ---------------------------------------------------------------- 도크 제목줄
 DockTitleBar::DockTitleBar(QDockWidget* dock) : QWidget(dock), dock_(dock) {
-    setFixedHeight(20);
+    setFixedHeight(22);
     setCursor(Qt::ArrowCursor);
+    setMouseTracking(true);
     connect(dock_, &QDockWidget::windowTitleChanged, this, [this] { update(); });
+}
+
+// 오른쪽 끝에서부터 같은 크기의 칸 세 개를 나란히 둔다 (0 = 고정, 1 = 접기, 2 = 닫기)
+QRect DockTitleBar::buttonRect(int i) const {
+    if (i < 0 || i >= kBtnCount) return QRect();
+    const int x = width() - kPad - (kBtnCount - i) * kBtn;
+    return QRect(x, (height() - kBtn) / 2, kBtn, kBtn);
+}
+
+int DockTitleBar::buttonAt(const QPoint& pos) const {
+    for (int i = 0; i < kBtnCount; ++i)
+        if (buttonRect(i).contains(pos)) return i;
+    return -1;
+}
+
+void DockTitleBar::mouseMoveEvent(QMouseEvent* e) {
+    const int h = buttonAt(e->pos());
+    if (h != hot_) {
+        hot_ = h;
+        static const char* tips[] = {"패널 고정 (끌어서 옮기지 못하게 잠급니다)", "패널 접기 / 펴기", "패널 닫기"};
+        setToolTip(h >= 0 ? QString::fromUtf8(tips[h]) : QString());
+        update();
+    }
+    QWidget::mouseMoveEvent(e);
+}
+
+void DockTitleBar::leaveEvent(QEvent*) {
+    if (hot_ < 0) return;
+    hot_ = -1;
+    setToolTip(QString());
+    update();
 }
 
 void DockTitleBar::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
     p.fillRect(rect(), palette().window());
-    p.setPen(palette().color(QPalette::WindowText));
-    p.drawText(QRect(6, 0, width() - 70, height()), Qt::AlignVCenter | Qt::AlignLeft, dock_->windowTitle());
-    // 오른쪽 위: ● (잠금) ▭ (접기) ▶ (닫기)
-    const int cy = height() / 2;
-    const int x0 = width() - 56;
-    p.setPen(QPen(palette().color(QPalette::WindowText), 1.4));
-    p.setBrush(locked_ ? palette().color(QPalette::WindowText) : Qt::NoBrush);
-    p.drawEllipse(QPointF(x0 + 6, cy), 4, 4);
-    p.setBrush(collapsed_ ? palette().color(QPalette::WindowText) : Qt::NoBrush);
-    p.drawRect(QRectF(x0 + 22, cy - 4, 9, 8));
+    const QColor fg = palette().color(QPalette::WindowText);
+    const int btnsLeft = buttonRect(0).left();
+    p.setPen(fg);
+    p.drawText(QRect(8, 0, std::max(10, btnsLeft - 14), height()), Qt::AlignVCenter | Qt::AlignLeft, dock_->windowTitle());
+
+    // 고정 / 접기 / 닫기. 셋 다 같은 크기의 칸 한가운데에 같은 크기로 그린다.
+    for (int i = 0; i < kBtnCount; ++i) {
+        const QRect br = buttonRect(i);
+        if (i == hot_) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(fg.red(), fg.green(), fg.blue(), 38));
+            p.drawRoundedRect(QRectF(br).adjusted(1, 1, -1, -1), 3, 3);
+        }
+        const QPointF c = QRectF(br).center();
+        const double s = 4.5;                 // 모두 같은 반지름 안에 들어오게 한다
+        p.setPen(QPen(fg, 1.4));
+        if (i == 0) {                          // 고정: 눌려 있으면 속을 채운다
+            p.setBrush(locked_ ? QBrush(fg) : Qt::NoBrush);
+            p.drawEllipse(c, s, s);
+        } else if (i == 1) {                   // 접기
+            p.setBrush(collapsed_ ? QBrush(fg) : Qt::NoBrush);
+            p.drawRect(QRectF(c.x() - s, c.y() - s * 0.8, s * 2, s * 1.6));
+        } else {                               // 닫기
+            p.setBrush(Qt::NoBrush);
+            p.drawLine(QPointF(c.x() - s, c.y() - s), QPointF(c.x() + s, c.y() + s));
+            p.drawLine(QPointF(c.x() + s, c.y() - s), QPointF(c.x() - s, c.y() + s));
+        }
+    }
     p.setBrush(Qt::NoBrush);
-    QPolygonF tri;
-    tri << QPointF(x0 + 42, cy - 4) << QPointF(x0 + 50, cy) << QPointF(x0 + 42, cy + 4);
-    p.drawPolygon(tri);
 }
 
 void DockTitleBar::mousePressEvent(QMouseEvent* e) {
-    const int x = e->pos().x() - (width() - 56);
-    if (x >= 0 && x < 18) {
+    switch (buttonAt(e->pos())) {
+    case 0: {
         locked_ = !locked_;
         QDockWidget::DockWidgetFeatures f = dock_->features();
         if (locked_) f &= ~(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
@@ -64,17 +112,22 @@ void DockTitleBar::mousePressEvent(QMouseEvent* e) {
         dock_->setFeatures(f);
         update();
         e->accept();
-    } else if (x >= 18 && x < 36) {
+        return;
+    }
+    case 1:
         collapsed_ = !collapsed_;
         if (dock_->widget()) dock_->widget()->setVisible(!collapsed_);
         update();
         e->accept();
-    } else if (x >= 36 && x < 56) {
+        return;
+    case 2:
         dock_->close();
         e->accept();
-    } else {
-        QWidget::mousePressEvent(e); // 제목을 눌러 끌면 패널 이동
+        return;
+    default:
+        QWidget::mousePressEvent(e);   // 제목을 눌러 끌면 패널 이동
         e->ignore();
+        return;
     }
 }
 

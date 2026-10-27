@@ -6,19 +6,25 @@
 #include "Style.h"
 
 #include <QInputDialog>
+#include <QEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <algorithm>
+#include <cmath>
 
 TimelineWidget::TimelineWidget(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) {
-    setMouseTracking(false);
+    setMouseTracking(true);
     auto refresh = [this] {
+        rangeCache_.clear();
         updateGeometry();
         resize(sizeHint());
         update();
     };
     connect(doc_, &Document::structureChanged, this, refresh);
-    connect(doc_, &Document::changed, this, [this] { update(); });
+    connect(doc_, &Document::changed, this, [this] {
+        rangeCache_.clear();
+        update();
+    });
     connect(doc_, &Document::currentChanged, this, [this] { update(); });
     resize(sizeHint());
 }
@@ -81,53 +87,102 @@ const QPixmap& TimelineWidget::thumb(const QImage& img, QSize box) {
     return thumbs_.insert(key, QPixmap::fromImage(t)).value();
 }
 
+// 선 끝에 붙이는 채운 화살촉. tip 이 뾰족한 끝, dir 은 향하는 쪽(길이 1).
+static void arrowHead(QPainter& p, const QPointF& tip, const QPointF& dir, double len, const QColor& c) {
+    const QPointF n(-dir.y(), dir.x());          // 수직 방향
+    const QPointF back = tip - dir * len;
+    const QPointF tri[3] = {tip, back + n * (len * 0.52), back - n * (len * 0.52)};
+    p.save();
+    p.setPen(Qt::NoPen);
+    p.setBrush(c);
+    p.drawPolygon(tri, 3);
+    p.restore();
+}
+
 // 비헤이비어 네 가지를 작은 그림으로 그린다: 없음 / 루프 / 핑퐁 / 유지
-static void drawBehaviorGlyph(QPainter& p, const QRect& r, int mode, const QColor& c) {
+// 모두 단추의 한가운데를 기준으로 좌우·상하 대칭이 되게 잡는다.
+static void drawBehaviorGlyph(QPainter& p, const QRect& box, int mode, const QColor& c) {
+    const QRectF r(box);                          // QRect::center() 는 반 픽셀이 어긋나므로 실수로 계산한다
+    const QPointF ctr = r.center();
+    const double R = std::min(r.width(), r.height()) * 0.5;
+    const double arm = R * 0.62;                  // 글리프가 차지하는 반지름
+    const double head = R * 0.42;                 // 화살촉 길이
     p.save();
     p.setRenderHint(QPainter::Antialiasing, true);
-    p.setPen(QPen(c, 1.4));
+    QPen pen(c, std::max(1.2, R * 0.16));
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(pen);
     p.setBrush(Qt::NoBrush);
-    const QPointF ctr = r.center();
-    const double w = r.width() * 0.34, h = r.height() * 0.28;
+
     switch (mode) {
-    case 1: { // 루프: 둥근 화살표
-        QRectF a(ctr.x() - w, ctr.y() - w, w * 2, w * 2);
-        p.drawArc(a, 40 * 16, 290 * 16);
-        const QPointF t(ctr.x() + w * 0.72, ctr.y() - w * 0.72);
-        p.drawLine(t, t + QPointF(-w * 0.1, -w * 0.75));
-        p.drawLine(t, t + QPointF(w * 0.75, -w * 0.1));
+    case 1: {   // 루프: 한 바퀴 도는 화살표. 위쪽을 터서 화살촉을 넣는다.
+        const double rad = arm * 0.92;
+        const QRectF a(ctr.x() - rad, ctr.y() - rad, rad * 2, rad * 2);
+        p.drawArc(a, 105 * 16, 315 * 16);         // 105° 에서 시작해 60° 에서 끝난다
+        const double th = 60.0 * 3.14159265358979323846 / 180.0;    // 끝나는 각도
+        const QPointF end(ctr.x() + rad * std::cos(th), ctr.y() - rad * std::sin(th));
+        const QPointF dir(-std::sin(th), -std::cos(th));   // 각도가 커지는 쪽(반시계)
+        arrowHead(p, end + dir * (head * 0.45), dir, head, c);
         break;
     }
-    case 2: { // 핑퐁: 양쪽 화살표
-        p.drawLine(QPointF(ctr.x() - w, ctr.y()), QPointF(ctr.x() + w, ctr.y()));
-        p.drawLine(QPointF(ctr.x() - w, ctr.y()), QPointF(ctr.x() - w + h, ctr.y() - h));
-        p.drawLine(QPointF(ctr.x() - w, ctr.y()), QPointF(ctr.x() - w + h, ctr.y() + h));
-        p.drawLine(QPointF(ctr.x() + w, ctr.y()), QPointF(ctr.x() + w - h, ctr.y() - h));
-        p.drawLine(QPointF(ctr.x() + w, ctr.y()), QPointF(ctr.x() + w - h, ctr.y() + h));
+    case 2: {   // 핑퐁: 가운데 선 + 양끝 화살촉
+        p.drawLine(QPointF(ctr.x() - arm + head * 0.5, ctr.y()), QPointF(ctr.x() + arm - head * 0.5, ctr.y()));
+        arrowHead(p, QPointF(ctr.x() + arm, ctr.y()), QPointF(1, 0), head, c);
+        arrowHead(p, QPointF(ctr.x() - arm, ctr.y()), QPointF(-1, 0), head, c);
         break;
     }
-    case 3: { // 유지: 세로 막대 + 오른쪽 화살표
-        p.drawLine(QPointF(ctr.x() - w, ctr.y() - h * 1.5), QPointF(ctr.x() - w, ctr.y() + h * 1.5));
-        p.drawLine(QPointF(ctr.x() - w * 0.55, ctr.y()), QPointF(ctr.x() + w, ctr.y()));
-        p.drawLine(QPointF(ctr.x() + w, ctr.y()), QPointF(ctr.x() + w - h, ctr.y() - h));
-        p.drawLine(QPointF(ctr.x() + w, ctr.y()), QPointF(ctr.x() + w - h, ctr.y() + h));
+    case 3: {   // 유지: 왼쪽 세로 막대 + 오른쪽으로 뻗는 화살표
+        p.drawLine(QPointF(ctr.x() - arm, ctr.y() - arm * 0.72), QPointF(ctr.x() - arm, ctr.y() + arm * 0.72));
+        p.drawLine(QPointF(ctr.x() - arm, ctr.y()), QPointF(ctr.x() + arm - head * 0.5, ctr.y()));
+        arrowHead(p, QPointF(ctr.x() + arm, ctr.y()), QPointF(1, 0), head, c);
         break;
     }
-    default: { // 없음: 점선
-        p.drawLine(QPointF(ctr.x() - w, ctr.y()), QPointF(ctr.x() - w * 0.35, ctr.y()));
-        p.drawLine(QPointF(ctr.x() + w * 0.35, ctr.y()), QPointF(ctr.x() + w, ctr.y()));
+    default: {  // 없음: 가운데가 끊긴 선
+        p.drawLine(QPointF(ctr.x() - arm, ctr.y()), QPointF(ctr.x() - arm * 0.3, ctr.y()));
+        p.drawLine(QPointF(ctr.x() + arm * 0.3, ctr.y()), QPointF(ctr.x() + arm, ctr.y()));
         break;
     }
     }
     p.restore();
 }
 
+// 눈·잠금 단추: 넓은 줄에서는 세로로 쌓고, 좁은 줄에서는 가로로 둔다. 둘 다 줄 한가운데에 맞춘다.
+QRect TimelineWidget::eyeRect(int row) const {
+    const int y = kHeader + row * rowH_;
+    if (compact_) {
+        const int s = 14;
+        return QRect(4, y + (rowH_ - s) / 2, s, s);
+    }
+    const int s = 16, gap = 6;
+    return QRect(4, y + (rowH_ - (s * 2 + gap)) / 2, s, s);
+}
+
+QRect TimelineWidget::lockRect(int row) const {
+    const QRect e = eyeRect(row);
+    if (compact_) return e.translated(e.width() + 4, 0);
+    return e.translated(0, e.height() + 6);
+}
+
+int TimelineWidget::headerIconRight() const {
+    return (compact_ ? lockRect(0).right() : eyeRect(0).right()) + 1;
+}
+
+QPoint TimelineWidget::layerRange(int layer) const {
+    auto it = rangeCache_.constFind(layer);
+    if (it != rangeCache_.constEnd()) return it.value();
+    const QPoint v(doc_->firstKey(layer), doc_->contentEnd(layer));
+    rangeCache_.insert(layer, v);
+    return v;
+}
+
 QRect TimelineWidget::behaviorButton(int row, int which) const {
     if (row < 0 || row >= doc_->layerCount()) return QRect();
     const int l = rowToLayer(row);
-    const int first = doc_->firstKey(l);
+    const QPoint rg = layerRange(l);
+    const int first = rg.x();
     if (first < 0) return QRect();
-    const int f = (which == 0) ? first - 1 : doc_->contentEnd(l);
+    const int f = (which == 0) ? first - 1 : rg.y();
     if (f < 0 || f >= doc_->frameCount()) return QRect();
     const int side = std::min(18, std::min(cellW_ - 2, rowH_ - 4));
     if (side < 8) return QRect();
@@ -136,6 +191,7 @@ QRect TimelineWidget::behaviorButton(int row, int which) const {
 }
 
 void TimelineWidget::paintEvent(QPaintEvent* ev) {
+    rangeCache_.clear();   // 그릴 때마다 새로 계산한다 (그 사이에는 재활용)
     QPainter p(this);
     const QPalette pal = palette();
     const bool dark = pal.color(QPalette::Window).lightness() < 128;
@@ -184,44 +240,50 @@ void TimelineWidget::paintEvent(QPaintEvent* ev) {
         p.fillRect(QRect(0, y, width(), rowH_), sel ? selRow : (row % 2 ? rowA : rowB));
 
         // ---- 레이어 머리글: 눈 / 잠금 / 썸네일 / 이름 / 불투명도
+        // 가로로 눈·잠금 → 썸네일 → 글, 사이를 8px 로 일정하게 띄운다.
         const QColor on = text, off = muted.darker(150);
-        const QIcon eye = Style::icon("eye", 16, L.visible ? on : off);
-        if (compact_) eye.paint(&p, QRect(2, y + 5, 14, 14));
-        else eye.paint(&p, QRect(4, y + 6, 16, 16));
-        const QIcon lock = Style::icon("lock", 16, L.locked ? QColor(0xe2, 0x6a, 0x4a) : off);
-        if (compact_) lock.paint(&p, QRect(18, y + 5, 14, 14));
-        else lock.paint(&p, QRect(4, y + 28, 16, 16));
-        // 현재 프레임의 키 이미지
-        const int kf = doc_->keyIndexAt(l, curF);
-        const QRect tr(26, y + 5, 52, rowH_ - 10);
+        const QRect er = eyeRect(row), lr = lockRect(row);
+        Style::icon("eye", er.width(), L.visible ? on : off).paint(&p, er);
+        Style::icon("lock", lr.width(), L.locked ? QColor(0xe2, 0x6a, 0x4a) : off).paint(&p, lr);
+        const int colGap = 8;
+        int textX = headerIconRight() + colGap;
         if (!compact_) {
+            // 현재 프레임의 키 이미지. 줄 높이에 맞춰 4:3 으로 잡는다.
+            const int th = rowH_ - 10;
+            const QRect tr(headerIconRight() + colGap, y + (rowH_ - th) / 2, th * 4 / 3, th);
+            const int kf = doc_->keyIndexAt(l, curF);
             if (kf >= 0) p.drawPixmap(tr.topLeft(), thumb(L.frames[kf], tr.size()));
             else p.fillRect(tr, QColor(0xf4, 0xf4, 0xf4, 40));
             p.setPen(QPen(grid, 1));
             p.setBrush(Qt::NoBrush);
-            p.drawRect(tr);
+            p.drawRect(QRectF(tr).adjusted(0.5, 0.5, -0.5, -0.5));
+            textX = tr.right() + 1 + colGap;
         }
         // 이름 + 보조 정보
         QString label = L.name;
         if (L.folder >= 0 && L.folder < doc_->folderCount()) label = QString("[%1] %2").arg(doc_->folder(L.folder).name, label);
         p.setPen(L.ctgLines ? QColor(0xff, 0xcc, 0x66) : text);
         p.setFont(font());
+        const int textW = std::max(20, kNameW - textX - colGap);
         if (compact_) {
-            p.drawText(QRect(38, y, kNameW - 42, rowH_), Qt::AlignVCenter | Qt::AlignLeft, label);
+            p.drawText(QRect(textX, y, textW, rowH_), Qt::AlignVCenter | Qt::AlignLeft, label);
         } else {
-            p.drawText(QRect(86, y + 6, kNameW - 90, 18), Qt::AlignVCenter | Qt::AlignLeft, label);
+            // 두 줄을 한 덩어리로 보고 줄 한가운데에 맞춘다
+            const int lineH = 18, blockH = lineH * 2 + 2;
+            const int t0 = y + (rowH_ - blockH) / 2;
+            p.drawText(QRect(textX, t0, textW, lineH), Qt::AlignVCenter | Qt::AlignLeft, label);
             p.setFont(small);
             p.setPen(muted);
             QString sub = QString("색상  %1%").arg(int(L.opacity * 100 + 0.5));
             if (!L.fx.isEmpty()) sub += QString("  FX %1").arg(L.fx.size());
             if (L.ctgLines) sub += QStringLiteral("  CTG");
-            p.drawText(QRect(86, y + 28, kNameW - 90, 18), Qt::AlignVCenter | Qt::AlignLeft, sub);
+            p.drawText(QRect(textX, t0 + lineH + 2, textW, lineH), Qt::AlignVCenter | Qt::AlignLeft, sub);
         }
 
         // ---- 프레임 칸
         int key = doc_->keyIndexAt(l, f0);
-        const int cFirst = doc_->firstKey(l);
-        const int cEnd = doc_->contentEnd(l);
+        const QPoint rg = layerRange(l);
+        const int cFirst = rg.x(), cEnd = rg.y();
         for (int f = f0; f <= f1; ++f) {
             if (!L.frames[f].isNull()) key = f;
             const QRect c(kNameW + f * cellW_, y, cellW_, rowH_);
@@ -268,9 +330,16 @@ void TimelineWidget::paintEvent(QPaintEvent* ev) {
             const QRect br = behaviorButton(row, which);
             if (br.isNull() || br.right() < clip.left() - 4 || br.left() > clip.right() + 4) continue;
             const int mode = which == 0 ? L.preBehavior : L.postBehavior;
-            p.setPen(QPen(grid, 1));
-            p.setBrush(dark ? bg.lighter(128) : bg.darker(108));
-            p.drawRoundedRect(br, 3, 3);
+            const bool hot = (hoverRow_ == row && hoverWhich_ == which);
+            // 1px 테두리가 또렷하게 떨어지도록 반 픽셀 안쪽으로 그린다
+            const QRectF bf = QRectF(br).adjusted(0.5, 0.5, -0.5, -0.5);
+            p.setRenderHint(QPainter::Antialiasing, true);
+            p.setPen(QPen(hot ? accent : grid, 1));
+            QColor face = dark ? bg.lighter(hot ? 150 : 128) : bg.darker(hot ? 116 : 108);
+            if (mode == 0) face.setAlpha(dark ? 190 : 150);   // 없음일 때는 한 단계 흐리게
+            p.setBrush(face);
+            p.drawRoundedRect(bf, 3.5, 3.5);
+            p.setRenderHint(QPainter::Antialiasing, false);
             p.setBrush(Qt::NoBrush);
             drawBehaviorGlyph(p, br, mode, mode == 0 ? muted : text);
         }
@@ -315,6 +384,38 @@ void TimelineWidget::paintEvent(QPaintEvent* ev) {
     p.drawLine(px + cellW_, kHeader, px + cellW_, height());
     p.setPen(grid);
     p.drawLine(kNameW, 0, kNameW, height());
+}
+
+void TimelineWidget::updateHover(const QPoint& pos) {
+    int row = -1, which = -1;
+    if (pos.y() >= kHeader) {
+        const int r = (pos.y() - kHeader) / rowH_;
+        for (int w = 0; w < 2; ++w) {
+            const QRect br = behaviorButton(r, w);
+            if (!br.isNull() && br.contains(pos)) { row = r; which = w; break; }
+        }
+    }
+    if (row == hoverRow_ && which == hoverWhich_) return;
+    // 바뀐 단추 자리만 다시 그린다
+    const QRect was = behaviorButton(hoverRow_, hoverWhich_);
+    hoverRow_ = row;
+    hoverWhich_ = which;
+    if (!was.isNull()) update(was.adjusted(-2, -2, 2, 2));
+    const QRect now = behaviorButton(row, which);
+    if (!now.isNull()) update(now.adjusted(-2, -2, 2, 2));
+    if (row >= 0) {
+        static const char* names[] = {"없음", "루프", "핑퐁", "유지"};
+        const Layer& L = doc_->layer(rowToLayer(row));
+        const int mode = which == 0 ? L.preBehavior : L.postBehavior;
+        setToolTip(QString::fromUtf8(which == 0 ? "첫 이미지 앞: %1  (눌러서 바꾸기)" : "마지막 이미지 뒤: %1  (눌러서 바꾸기)")
+                       .arg(QString::fromUtf8(names[std::clamp(mode, 0, 3)])));
+    } else {
+        setToolTip(QString());
+    }
+}
+
+void TimelineWidget::leaveEvent(QEvent*) {
+    updateHover(QPoint(-1, -1));
 }
 
 bool TimelineWidget::behaviorMenuAt(const QPoint& pos) {
@@ -366,11 +467,14 @@ void TimelineWidget::pick(const QPoint& pos, bool pressed) {
     const int row = (pos.y() - kHeader) / rowH_;
     if (row < 0 || row >= doc_->layerCount()) return;
     const int l = rowToLayer(row);
-    const int ry = (pos.y() - kHeader) % rowH_;
-    if (pos.x() < (compact_ ? 34 : 24)) {
-        const bool eyeHit = compact_ ? pos.x() < 17 : ry < rowH_ / 2;
-        if (eyeHit) doc_->layer(l).visible = !doc_->layer(l).visible;
-        else doc_->layer(l).locked = !doc_->layer(l).locked;
+    // 그릴 때 쓰는 자리를 그대로 써서, 보이는 단추와 눌리는 자리가 어긋나지 않게 한다 (2px 여유)
+    const QRect er = eyeRect(row).adjusted(-2, -2, 2, 2);
+    const QRect lr = lockRect(row).adjusted(-2, -2, 2, 2);
+    if (er.contains(pos)) {
+        doc_->layer(l).visible = !doc_->layer(l).visible;
+        doc_->notifyStructure();
+    } else if (lr.contains(pos)) {
+        doc_->layer(l).locked = !doc_->layer(l).locked;
         doc_->notifyStructure();
     } else {
         doc_->setCurrentLayer(l);
@@ -397,6 +501,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* e) {
 }
 
 void TimelineWidget::mouseMoveEvent(QMouseEvent* e) {
+    if (!(e->buttons() & Qt::LeftButton)) updateHover(e->pos());
     if (rangeDrag_) {
         const int f = std::clamp((e->pos().x() - kNameW) / cellW_, 0, doc_->frameCount() - 1);
         rangeA_ = std::min(anchor_, f);

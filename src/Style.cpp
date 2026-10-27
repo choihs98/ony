@@ -340,6 +340,12 @@ Glyph makeGlyph(const QString& n) {
         s.cubicTo(19, 18, 9, 19, 5, 15);
         f.addPolygon(QPolygonF({{19, 5}, {19, 10}, {14, 9.5}}));
         f.addPolygon(QPolygonF({{5, 19}, {5, 14}, {10, 14.5}}));
+    } else if (n == "pingpong") {
+        // 양쪽으로 머리가 달린 화살표 (가운데를 기준으로 좌우 대칭)
+        s.moveTo(8, 12);
+        s.lineTo(16, 12);
+        f.addPolygon(QPolygonF({{4.5, 12}, {9.5, 8.75}, {9.5, 15.25}}));
+        f.addPolygon(QPolygonF({{19.5, 12}, {14.5, 8.75}, {14.5, 15.25}}));
     } else if (n == "hand") {
         s.moveTo(8, 12);
         s.lineTo(8, 5);

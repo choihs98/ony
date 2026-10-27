@@ -12,15 +12,22 @@ class DockTitleBar : public QWidget {
     Q_OBJECT
 public:
     explicit DockTitleBar(QDockWidget* dock);
-    QSize sizeHint() const override { return QSize(120, 20); }
-    QSize minimumSizeHint() const override { return QSize(60, 20); }
+    QSize sizeHint() const override { return QSize(120, 22); }
+    QSize minimumSizeHint() const override { return QSize(60, 22); }
+    // 오른쪽 단추 세 개(고정 / 접기 / 닫기)의 자리. 그리기와 누르기가 같은 값을 쓴다.
+    static constexpr int kBtn = 18, kBtnCount = 3, kPad = 5;
+    QRect buttonRect(int i) const;
+    int buttonAt(const QPoint& pos) const;
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
+    void mouseMoveEvent(QMouseEvent*) override;
+    void leaveEvent(QEvent*) override;
 private:
     QDockWidget* dock_;
     bool locked_ = false;
     bool collapsed_ = false;
+    int hot_ = -1;
 };
 
 // 내비게이터: 프로젝트 전체 미리보기 + 현재 보이는 영역. 클릭/드래그로 화면 이동, 슬라이더로 확대.

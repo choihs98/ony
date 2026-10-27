@@ -1,6 +1,7 @@
 #pragma once
 #include <QHash>
 #include <QPixmap>
+#include <QPoint>
 #include <QVector>
 #include <QWidget>
 
@@ -39,6 +40,7 @@ protected:
     void mouseMoveEvent(QMouseEvent*) override;
     void mouseReleaseEvent(QMouseEvent*) override;
     void mouseDoubleClickEvent(QMouseEvent*) override;
+    void leaveEvent(QEvent*) override;
     void contextMenuEvent(QContextMenuEvent*) override;
     void wheelEvent(QWheelEvent*) override;
 
@@ -49,8 +51,19 @@ private:
     int rowToLayer(int row) const;
     int layerToRow(int layer) const;
     // 프리/포스트 비헤이비어 단추 (which 0 = 첫 이미지 앞, 1 = 마지막 이미지 뒤). 자리가 없으면 빈 사각형.
+    // 레이어의 (첫 이미지, 내용 끝). 한 번 그리는 동안 같은 값을 여러 번 쓰므로 모아 둔다.
+    // 문서가 바뀌면(= 다시 그릴 때마다) 비운다.
+    QPoint layerRange(int layer) const;
+    mutable QHash<int, QPoint> rangeCache_;
+    // 레이어 머리글의 눈·잠금 단추 자리 (그리기와 누르기가 같은 값을 쓴다)
+    QRect eyeRect(int row) const;
+    QRect lockRect(int row) const;
+    int headerIconRight() const;
     QRect behaviorButton(int row, int which) const;
     bool behaviorMenuAt(const QPoint& pos);
+    // 마우스가 얹힌 비헤이비어 단추 (없으면 -1). 바뀔 때만 다시 그린다.
+    void updateHover(const QPoint& pos);
+    int hoverRow_ = -1, hoverWhich_ = -1;
     void pick(const QPoint& pos, bool pressed);
     const QPixmap& thumb(const QImage& img, QSize box);
 

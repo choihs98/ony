@@ -284,19 +284,28 @@ void MainWindow::buildCentral() {
     // ---- 재생 바 (문서 순서: 소리, 반복, 카메라 보기, FPS, | 재생 컨트롤 | 재중앙) ----
     auto* pb = new QWidget;
     auto* ph = new QHBoxLayout(pb);
-    ph->setContentsMargins(6, 2, 6, 2);
-    ph->setSpacing(3);
+    ph->setContentsMargins(8, 3, 8, 3);
+    ph->setSpacing(4);
+    // 재생 줄의 모든 칸을 같은 높이로 맞춘다. 아이콘 단추는 정사각형이라 아이콘이 한가운데에 온다.
+    const int kBtn = 26, kIcon = 16;
     auto addBtn = [&](const QString& iconName, const QString& tip, auto fn, bool checkable = false) {
         auto* b = new QToolButton;
-        b->setIcon(Style::icon(iconName, 18));
-        b->setIconSize(QSize(18, 18));
-        b->setFixedSize(28, 24);
+        b->setIcon(Style::icon(iconName, kIcon));
+        b->setIconSize(QSize(kIcon, kIcon));
+        b->setFixedSize(kBtn, kBtn);
         b->setToolTip(tip);
         b->setCheckable(checkable);
+        b->setFocusPolicy(Qt::NoFocus);
         if (checkable) connect(b, &QToolButton::toggled, this, fn);
         else connect(b, &QToolButton::clicked, this, fn);
         ph->addWidget(b);
         return b;
+    };
+    // 글자만 있는 단추도 같은 높이로. 좌우 여백은 스타일시트로 고르게 준다.
+    auto fitText = [kBtn](QWidget* w) {
+        w->setFixedHeight(kBtn);
+        w->setFocusPolicy(Qt::NoFocus);
+        return w;
     };
     auto* markIn = new QToolButton;
     markIn->setText(QStringLiteral("마크 인"));
@@ -306,23 +315,23 @@ void MainWindow::buildCentral() {
         const int b = (loopB_ >= cur) ? loopB_ : doc_->frameCount() - 1;
         timeline_->setRange(cur, b);
     });
-    ph->addWidget(markIn);
+    ph->addWidget(fitText(markIn));
     soundBtn_ = addBtn("sound", "소리 켜기/끄기", [this](bool on) {
         if (audioOut_) audioOut_->setMuted(!on);
     }, true);
     soundBtn_->setChecked(true);
     loopBox_ = addBtn("loop", "반복 재생 / 한 번만 재생", [](bool) {}, true);
     loopBox_->setChecked(true);
-    pingBtn_ = addBtn("loop", "왕복 재생 (끝에서 거꾸로 되돌아옴)", [](bool) {}, true);
-    pingBtn_->setText(QStringLiteral("↔"));
+    pingBtn_ = addBtn("pingpong", "왕복 재생 (끝에서 거꾸로 되돌아옴)", [](bool) {}, true);
     speedBox_ = new QComboBox;
     for (double s : {0.25, 0.5, 1.0, 1.5, 2.0, 4.0}) speedBox_->addItem(QString("×%1").arg(s), s);
     speedBox_->setCurrentIndex(2);
     speedBox_->setToolTip(QStringLiteral("재생 속도 (프로젝트 프레임 속도에 곱해집니다)"));
+    speedBox_->setFixedWidth(68);
     connect(speedBox_, &QComboBox::currentIndexChanged, this, [this] {
         playTimer_.setInterval(std::max(1, int(1000 / (doc_->fps() * speedBox_->currentData().toDouble()))));
     });
-    ph->addWidget(speedBox_);
+    ph->addWidget(fitText(speedBox_));
     camViewBtn_ = addBtn("camera", "카메라 보기로 재생", [this](bool on) {
         canvas_->setCameraView(on);
         if (camViewAct_ && camViewAct_->isChecked() != on) camViewAct_->setChecked(on);
@@ -334,11 +343,12 @@ void MainWindow::buildCentral() {
     fpsSpin_->setButtonSymbols(QAbstractSpinBox::NoButtons);
     fpsSpin_->setFixedWidth(64);
     connect(fpsSpin_, &QSpinBox::valueChanged, this, [this](int v) { doc_->setFps(v); });
-    ph->addWidget(fpsSpin_);
+    ph->addWidget(fitText(fpsSpin_));
     scrubBtn_ = new QToolButton;
-    scrubBtn_->setIcon(Style::icon("hand", 18));
-    scrubBtn_->setIconSize(QSize(18, 18));
-    scrubBtn_->setFixedSize(28, 24);
+    scrubBtn_->setIcon(Style::icon("hand", kIcon));
+    scrubBtn_->setIconSize(QSize(kIcon, kIcon));
+    scrubBtn_->setFixedSize(kBtn, kBtn);
+    scrubBtn_->setFocusPolicy(Qt::NoFocus);
     scrubBtn_->setToolTip(QStringLiteral("누른 채 좌우로 끌면 재생 헤드를 부드럽게 이동 (놓으면 원위치)"));
     scrubBtn_->installEventFilter(this);
     ph->addWidget(scrubBtn_);
@@ -376,7 +386,7 @@ void MainWindow::buildCentral() {
             doc_->insertFrame(doc_->currentFrame() + 1);
             gotoFrame(doc_->currentFrame() + 1);
         });
-        ph->addWidget(addF);
+        ph->addWidget(fitText(addF));
     }
     ph->addStretch();
     addBtn("center", "재생 헤드를 타임라인 중앙으로", [this] {
@@ -384,10 +394,10 @@ void MainWindow::buildCentral() {
         tlScroll_->horizontalScrollBar()->setValue(x - tlScroll_->viewport()->width() / 2);
     });
     zoomLabel_ = new QLabel(QStringLiteral("100%"));
-    zoomLabel_->setMinimumWidth(56);
+    zoomLabel_->setMinimumWidth(58);
     zoomLabel_->setAlignment(Qt::AlignCenter);
-    zoomLabel_->setStyleSheet("background:#35393a;border:1px solid #2c2c2c;padding:2px 4px;");
-    ph->addWidget(zoomLabel_);
+    zoomLabel_->setStyleSheet("background:#35393a;border:1px solid #2c2c2c;border-radius:3px;");
+    ph->addWidget(fitText(zoomLabel_));
     loopModeBtn_ = new QToolButton;
     loopModeBtn_->setText(QStringLiteral("구간"));
     loopModeBtn_->setCheckable(true);
@@ -395,7 +405,7 @@ void MainWindow::buildCentral() {
     connect(loopModeBtn_, &QToolButton::toggled, this, [this](bool on) {
         if (on && loopA_ < 0) statusBar()->showMessage(QStringLiteral("타임라인 위쪽 눈금을 Shift+드래그해서 구간을 지정하세요."), 4000);
     });
-    ph->addWidget(loopModeBtn_);
+    ph->addWidget(fitText(loopModeBtn_));
     auto* markOut = new QToolButton;
     markOut->setText(QStringLiteral("마크 아웃"));
     markOut->setToolTip(QStringLiteral("현재 프레임을 반복 구간의 끝으로 지정"));
@@ -404,8 +414,24 @@ void MainWindow::buildCentral() {
         const int a = (loopA_ >= 0 && loopA_ <= cur) ? loopA_ : 0;
         timeline_->setRange(a, cur);
     });
-    ph->addWidget(markOut);
-    lay->addWidget(pb);
+    ph->addWidget(fitText(markOut));
+    // 창이 좁아도 단추가 잘리지 않도록, 좁을 때만 가로로 밀어 볼 수 있게 감싼다
+    auto* pbScroll = new QScrollArea;
+    pbScroll->setWidget(pb);
+    pbScroll->setWidgetResizable(true);
+    pbScroll->setFrameShape(QFrame::NoFrame);
+    pbScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    pbScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    pbScroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    // 가로 막대가 필요할 때만 그만큼 키운다 (넓을 때는 한 줄 높이 그대로)
+    auto fitBar = [pb, pbScroll] {
+        const bool bar = pbScroll->horizontalScrollBar()->maximum() > 0;
+        pbScroll->setFixedHeight(pb->sizeHint().height() + 2 +
+                                 (bar ? pbScroll->horizontalScrollBar()->sizeHint().height() : 0));
+    };
+    connect(pbScroll->horizontalScrollBar(), &QScrollBar::rangeChanged, pbScroll, [fitBar](int, int) { fitBar(); });
+    fitBar();
+    lay->addWidget(pbScroll);
 
     scrub_ = new ScrubBar(doc_);
     lay->addWidget(scrub_);
@@ -416,13 +442,15 @@ void MainWindow::buildCentral() {
     // ---- 타임라인 위 줄: 레이어 조작 + 프로젝트/클립/레이어 정보 ----
     auto* strip = new QWidget;
     auto* sh = new QHBoxLayout(strip);
-    sh->setContentsMargins(6, 2, 6, 2);
-    sh->setSpacing(3);
+    sh->setContentsMargins(8, 3, 8, 3);
+    sh->setSpacing(4);
     auto layerBtn = [&](const QString& t, const QString& tip, auto fn) {
         auto* b = new QToolButton;
         b->setText(t);
         b->setToolTip(tip);
-        b->setMinimumWidth(b->fontMetrics().horizontalAdvance(t) + 14);
+        b->setMinimumWidth(std::max(26, b->fontMetrics().horizontalAdvance(t) + 16));
+        b->setFixedHeight(26);
+        b->setFocusPolicy(Qt::NoFocus);
         connect(b, &QToolButton::clicked, this, fn);
         sh->addWidget(b);
     };
@@ -445,7 +473,13 @@ void MainWindow::buildCentral() {
     infoClip_ = new QLabel;
     infoLayer_ = new QLabel;
     infoImage_ = new QLabel;
-    for (QLabel* l : {infoProject_, infoClip_, infoLayer_}) l->setStyleSheet("color:#a8a8a8;");
+    for (QLabel* l : {infoProject_, infoClip_, infoLayer_}) {
+        l->setStyleSheet("color:#a8a8a8;");
+        // 줄이 좁아져도 다른 칸을 밀지 않고 저희끼리 줄어들게 한다 (글은 … 으로 줄인다)
+        l->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        l->setMinimumWidth(0);
+        l->setTextFormat(Qt::PlainText);
+    }
     sh->addSpacing(12);
     sh->addWidget(infoProject_);
     sh->addWidget(infoClip_);
@@ -4059,6 +4093,12 @@ void MainWindow::updateTitle() {
 }
 
 void MainWindow::updateInfo() {
+    // 줄이 좁으면 글을 … 으로 줄여서, 옆 칸을 밀거나 겹치지 않게 한다
+    auto setElided = [](QLabel* lb, const QString& t) {
+        lb->setToolTip(t);
+        const int w = lb->width();
+        lb->setText(w > 24 ? lb->fontMetrics().elidedText(t, Qt::ElideRight, w) : t);
+    };
     infoCoord_->setText(QString("X: %1  Y: %2").arg(cursorX_).arg(cursorY_));
     QString col = QStringLiteral("RGBA: -");
     if (cursorX_ >= 0 && cursorY_ >= 0 && cursorX_ < doc_->size().width() && cursorY_ < doc_->size().height()) {
@@ -4071,10 +4111,10 @@ void MainWindow::updateInfo() {
     }
     infoColor_->setText(col);
     const int n = doc_->frameCount();
-    infoProject_->setText(QString("프로젝트: %1  1–%2 (%3 프레임)")
+    setElided(infoProject_, QString("프로젝트: %1  1–%2 (%3 프레임)")
                               .arg(doc_->path().isEmpty() ? QStringLiteral("이름 없음") : QFileInfo(doc_->path()).completeBaseName())
                               .arg(n).arg(n));
-    infoClip_->setText(QString("클립 %1/%2: %3  1–%4 (%5 프레임)").arg(clipIdx_ + 1).arg(clipNames_.size()).arg(clipNames_[clipIdx_]).arg(n).arg(n));
+    setElided(infoClip_, QString("클립 %1/%2: %3  1–%4 (%5 프레임)").arg(clipIdx_ + 1).arg(clipNames_.size()).arg(clipNames_[clipIdx_]).arg(n).arg(n));
     const int l = doc_->currentLayer();
     int first = -1, last = -1, cnt = 0;
     for (int f = 0; f < n; ++f)
@@ -4083,7 +4123,7 @@ void MainWindow::updateInfo() {
             last = f;
             ++cnt;
         }
-    infoLayer_->setText(QString("레이어 %1/%2: %3  %4 (%5 이미지)")
+    setElided(infoLayer_, QString("레이어 %1/%2: %3  %4 (%5 이미지)")
                             .arg(l + 1).arg(doc_->layerCount()).arg(doc_->layer(l).name)
                             .arg(first < 0 ? QStringLiteral("비어 있음") : QString("%1–%2").arg(first + 1).arg(last + 1))
                             .arg(cnt));
