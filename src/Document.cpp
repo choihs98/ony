@@ -1,3 +1,4 @@
+#include <functional>
 #include "Document.h"
 #include <QFileInfo>
 #include "Blend.h"

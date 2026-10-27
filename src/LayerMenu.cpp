@@ -1,3 +1,4 @@
+#include <functional>
 #include <algorithm>
 #include "LayerMenu.h"
 #include "Blend.h"

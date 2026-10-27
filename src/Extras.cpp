@@ -1,3 +1,5 @@
+#include <cmath>
+#include <functional>
 #include <algorithm>
 #include <QCheckBox>
 #include "Extras.h"
@@ -309,7 +311,7 @@ QString ScriptEngine::expand(const QString& s) const {
         } else {
             v = QStringLiteral("0");
         }
-        repl.push_back({m.capturedStart(0), {m.capturedLength(0), v}});
+        repl.push_back({int(m.capturedStart(0)), {int(m.capturedLength(0)), v}});
     }
     for (int k = repl.size() - 1; k >= 0; --k) out.replace(repl[k].first, repl[k].second.first, repl[k].second.second);
     return out;

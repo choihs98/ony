@@ -1,3 +1,4 @@
+#include <functional>
 #include <QApplication>
 #include <QGuiApplication>
 #include <QScreen>

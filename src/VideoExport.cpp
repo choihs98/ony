@@ -1,3 +1,4 @@
+#include <functional>
 #include "VideoExport.h"
 #include "Document.h"
 

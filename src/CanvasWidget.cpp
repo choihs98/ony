@@ -1,3 +1,4 @@
+#include <functional>
 #include "CanvasWidget.h"
 #include <QFontMetricsF>
 #include <QGradient>

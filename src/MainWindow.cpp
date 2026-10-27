@@ -1,3 +1,6 @@
+#include <cmath>
+#include <functional>
+#include <optional>
 #include <algorithm>
 #include "MainWindow.h"
 #include "CanvasWidget.h"
