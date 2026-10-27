@@ -10,7 +10,12 @@
 #include "CanvasWidget.h"
 #include "Document.h"
 #include "Effects.h"
+#include "Panels.h"
+#include "CurvesDialog.h"
+#include "Collab.h"
+#include "Plugins.h"
 #include "Print.h"
+#include "Psd.h"
 #include "TimelineWidget.h"
 #include "MainWindow.h"
 #include <QLineEdit>
@@ -429,6 +434,77 @@ static void testTimelineZoom() {
     CHECK(t.sizeHint() == s0);
 }
 
+static void testTiltAndCustomBrush(MainWindow& w) {
+    Document* d = w.document();
+    CanvasWidget* c = w.canvas();
+    d->newProject(QSize(200, 160), 4, 12);
+    c->zoomActual();
+    c->clearSelection();
+    c->setGuides(CanvasWidget::Guides());
+    c->setSymmetry(CanvasWidget::Symmetry());
+    c->setColorA(Qt::black);
+    c->setTool(CanvasWidget::Tool::Pen);
+    auto dot = [&](int y, const BrushParams& bp) {
+        c->setBrush(bp);
+        QTest::mousePress(c, Qt::LeftButton, {}, imgToWidget(c, d, {100, y}));
+        QTest::mouseRelease(c, Qt::LeftButton, {}, imgToWidget(c, d, {100, y}));
+    };
+    auto span = [&](const QImage& im, int y, bool horiz) {
+        int n = 0;
+        if (horiz) { for (int x = 0; x < im.width(); ++x) n += qAlpha(im.pixel(x, y)) > 100; }
+        else { for (int yy = 0; yy < im.height(); ++yy) n += qAlpha(im.pixel(y, yy)) > 100; }
+        return n;
+    };
+    // 기울기 없음: 가로·세로 폭이 비슷한 둥근 자국
+    BrushParams bp; bp.size = 30; bp.preset = 0; bp.hardness = 100;
+    c->setPenTilt(0, 0);
+    dot(40, bp);
+    QImage im = d->keyImage(0, 0);
+    const int w0 = span(im, 40, true), h0 = span(im, 100, false);
+    CHECK(w0 > 20 && std::abs(w0 - h0) <= 4);
+    d->undoStack()->undo();
+    // 기울기 사용: 가로로 납작해진다
+    bp.tilt = true;
+    c->setPenTilt(0, 1.0);
+    dot(40, bp);
+    im = d->keyImage(0, 0);
+    const int w1 = span(im, 40, true), h1 = span(im, 100, false);
+    CHECK(w1 > h1 + 8);
+    d->undoStack()->undo();
+    // 사용자 브러시: 가로로 긴 막대 그림을 도장으로 쓰면 자국도 가로로 길다
+    QImage bar(60, 12, QImage::Format_ARGB32_Premultiplied);
+    bar.fill(Qt::black);
+    const int id = addCustomBrush("막대", bar);
+    CHECK(id >= 0 && customBrushCount() == id + 1);
+    CHECK(customBrushName(id) == QStringLiteral("막대"));
+    BrushParams cb; cb.size = 40; cb.preset = 0; cb.customBrush = id;
+    c->setPenTilt(0, 0);
+    dot(100, cb);
+    im = d->keyImage(0, 0);
+    CHECK(span(im, 100, true) > span(im, 100, false) + 10);
+    d->undoStack()->undo();
+    clearCustomBrushes();
+    CHECK(customBrushCount() == 0);
+    // 사용자 질감: 지정하면 빈 곳이 생긴다
+    QImage tex(64, 64, QImage::Format_ARGB32);
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x) tex.setPixel(x, y, ((x / 4 + y / 4) % 2) ? qRgb(255, 255, 255) : qRgb(0, 0, 0));
+    setCustomGrainTexture(tex);
+    CHECK(!customGrainTexture().isNull());
+    BrushParams gb; gb.size = 24; gb.preset = 0; gb.hardness = 100;
+    c->setBrush(gb);
+    QTest::mousePress(c, Qt::LeftButton, {}, imgToWidget(c, d, {40, 130}));
+    QTest::mouseMove(c, imgToWidget(c, d, {160, 130}));
+    QTest::mouseRelease(c, Qt::LeftButton, {}, imgToWidget(c, d, {160, 130}));
+    im = d->keyImage(0, 0);
+    int solid = 0, holes = 0;
+    for (int x = 40; x < 160; ++x) (qAlpha(im.pixel(x, 130)) > 128 ? solid : holes)++;
+    CHECK(solid > 10 && holes > 10);     // 질감 때문에 칠해진 곳과 빈 곳이 섞인다
+    setCustomGrainTexture(QImage());
+    CHECK(customGrainTexture().isNull());
+    d->undoStack()->undo();
+}
+
 static void testCutDashBrush() {
     CHECK(brushPresetCount() >= 27);
     int dash = -1, cut = -1, dot = -1;
@@ -826,6 +902,692 @@ static void testShortcuts(MainWindow& w) {
     press(Qt::Key_B);
 }
 
+static void testPaletteAndKeyProfile(MainWindow& w) {
+    // 팔레트 저장 → 바꾸기 → 불러오기
+    ColorPanel* cp = w.colorPanel();
+    CHECK(cp != nullptr);
+    const QVector<QColor> def = cp->swatches();
+    CHECK(def.size() >= 16);
+    cp->setSwatches({QColor("#112233"), QColor("#445566"), QColor("#778899")});
+    CHECK(cp->swatches().size() == 3 && cp->swatches()[1] == QColor("#445566"));
+    CHECK(w.savePalette("/tmp/demo/p.onypal"));
+    CHECK(w.savePalette("/tmp/demo/p.gpl"));
+    cp->setSwatches(ColorPanel::defaultPalette());
+    CHECK(cp->swatches().size() == def.size());
+    CHECK(w.loadPalette("/tmp/demo/p.onypal") == 3);
+    CHECK(cp->swatches()[2] == QColor("#778899"));
+    cp->setSwatches(ColorPanel::defaultPalette());
+    CHECK(w.loadPalette("/tmp/demo/p.gpl") == 3);
+    CHECK(cp->swatches()[0] == QColor("#112233"));
+    CHECK(w.loadPalette("/tmp/demo/없는팔레트.onypal") == 0);
+    cp->setSwatches(def);
+
+    // 단축키 프로필
+    auto& S = Shortcuts::instance();
+    QString eid;
+    for (const auto& c : S.commands())
+        if (c.category == "도구" && c.label == "지우개") eid = c.id;
+    CHECK(!eid.isEmpty());
+    const QKeySequence orig = S.current(eid);
+    S.set(eid, QKeySequence(Qt::Key_F8));
+    CHECK(S.current(eid) == QKeySequence(Qt::Key_F8));
+    CHECK(S.saveProfile("/tmp/demo/k.onykeys").isEmpty());
+    S.resetAll();
+    CHECK(S.current(eid) == orig);
+    CHECK(S.loadProfile("/tmp/demo/k.onykeys").isEmpty());
+    CHECK(S.current(eid) == QKeySequence(Qt::Key_F8));
+    CHECK(!S.loadProfile("/tmp/demo/p.onypal").isEmpty());   // 다른 종류 파일은 거절
+    S.resetAll();
+    CHECK(S.current(eid) == orig);
+}
+
+static void testCollab() {
+    const QString p = "/tmp/demo/shared/project.ony";
+    QDir().mkpath("/tmp/demo/shared");
+    QFile::remove(Collab::lockPath(p));
+    QFile::remove(Collab::historyPath(p));
+    {   // 프로젝트 파일이 있어야 보기 좋다
+        Document d;
+        d.newProject(QSize(40, 40), 2, 12);
+        CHECK(d.saveCopy(p));
+    }
+    Collab::setUserName("나");
+    CHECK(Collab::userName() == QStringLiteral("나"));
+    // 처음에는 아무도 안 쓴다
+    CHECK(!Collab::checkLock(p).locked);
+    // 잠금 받기
+    CHECK(Collab::acquireLock(p));
+    Collab::LockInfo i = Collab::checkLock(p);
+    CHECK(i.locked && i.mine && !i.stale);
+    CHECK(i.user == QStringLiteral("나"));
+    CHECK(QFile::exists(Collab::lockPath(p)));
+    // 같은 사람이 다시 받아도 된다
+    CHECK(Collab::acquireLock(p));
+    // 다른 사람이면 거절당한다
+    Collab::setUserName("동료");
+    Collab::LockInfo other;
+    CHECK(!Collab::acquireLock(p, &other));
+    CHECK(other.locked && !other.mine && other.user == QStringLiteral("나"));
+    // 남의 잠금은 그냥 못 푼다
+    CHECK(!Collab::releaseLock(p));
+    CHECK(Collab::checkLock(p).locked);
+    // 뺏기는 된다
+    CHECK(Collab::releaseLock(p, true));
+    CHECK(!Collab::checkLock(p).locked);
+    CHECK(Collab::acquireLock(p));
+    CHECK(Collab::checkLock(p).user == QStringLiteral("동료"));
+    // 오래된 잠금은 버려진 것으로 본다
+    Collab::setStaleMinutes(5);
+    {
+        QFile f(Collab::lockPath(p));
+        CHECK(f.open(QIODevice::WriteOnly | QIODevice::Text));
+        const QString old = QDateTime::currentDateTime().addSecs(-3600).toString(Qt::ISODate);
+        f.write(QString("{\"user\":\"옛사람\",\"machine\":\"옛컴\",\"since\":\"%1\",\"touched\":\"%1\"}").arg(old).toUtf8());
+    }
+    i = Collab::checkLock(p);
+    CHECK(i.locked && !i.mine && i.stale);
+    CHECK(Collab::acquireLock(p));                       // 버려진 잠금은 가져올 수 있다
+    CHECK(Collab::checkLock(p).user == QStringLiteral("동료"));
+    // 이력
+    Collab::appendHistory(p, "배경 칠함", 1234);
+    Collab::setUserName("나");
+    Collab::appendHistory(p, "선 정리", 2345);
+    const auto h = Collab::readHistory(p);
+    CHECK(h.size() == 2);
+    CHECK(h[0].user == QStringLiteral("동료") && h[0].note == QStringLiteral("배경 칠함") && h[0].bytes == 1234);
+    CHECK(h[1].user == QStringLiteral("나") && h[1].note == QStringLiteral("선 정리"));
+    CHECK(h[1].when.isValid() && h[0].when <= h[1].when);
+    // 표시 파일은 프로젝트 옆에 생긴다
+    CHECK(Collab::lockPath(p) == p + ".lock");
+    CHECK(Collab::historyPath(p) == p + ".history");
+    CHECK(!Collab::releaseLock(p));            // 지금 잠금 주인은 "동료" 라 내가 못 푼다
+    CHECK(Collab::releaseLock(p, true));
+    CHECK(!QFile::exists(Collab::lockPath(p)));
+    // 경로가 없으면 아무 일도 안 한다
+    CHECK(!Collab::acquireLock(QString()));
+    CHECK(!Collab::checkLock(QString()).locked);
+    Collab::setStaleMinutes(120);
+}
+
+static void testPlugins(MainWindow& w) {
+    // 예제 플러그인이 만들어지고 읽힌다
+    Plugins::installSample();
+    QVector<Plugins::Plugin> ps = Plugins::scan();
+    int sample = -1;
+    for (int i = 0; i < ps.size(); ++i)
+        if (ps[i].id == QStringLiteral("ony-sample")) sample = i;
+    CHECK(sample >= 0);
+    CHECK(ps[sample].error.isEmpty());
+    CHECK(ps[sample].commands.size() == 4);
+    CHECK(ps[sample].name == QStringLiteral("예제 플러그인"));
+    // 스크립트 파일에서 읽은 것과 바로 적은 것 둘 다 들어온다
+    bool fromFile = false, inline_ = false, asked = false;
+    for (const Plugins::Command& c : ps[sample].commands) {
+        if (c.label.contains("바둑판")) fromFile = c.script.contains("layer.new");
+        if (c.label.contains("뒤집고")) inline_ = c.script.contains("fx.invert");
+        if (!c.ask.isEmpty()) asked = c.ask.startsWith("n:");
+    }
+    CHECK(fromFile && inline_ && asked);
+    // 켜짐/꺼짐이 저장된다
+    CHECK(Plugins::isEnabled("ony-sample"));
+    Plugins::setEnabled("ony-sample", false);
+    CHECK(!Plugins::isEnabled("ony-sample"));
+    CHECK(!Plugins::scan()[sample].enabled);
+    Plugins::setEnabled("ony-sample", true);
+    // 플러그인 스크립트가 실제로 돈다
+    Document* d = w.document();
+    d->newProject(QSize(200, 160), 3, 12);
+    const int before = d->layerCount();
+    for (const Plugins::Command& c : ps[sample].commands)
+        if (c.label.contains("바둑판")) {
+            ScriptEngine e(d);
+            e.setHost([&w](const QStringList& t) { return w.scriptHostCommand(t); });
+            const QString log = e.run(c.script);
+            CHECK(!log.contains("알 수 없는"));
+        }
+    CHECK(d->layerCount() == before + 1);
+    CHECK(qAlpha(d->keyImage(d->currentLayer(), d->keyIndexAt(d->currentLayer(), 0)).pixel(20, 20)) > 200);
+    // 설치 / 삭제
+    const QString tmpDir = "/tmp/demo/myplug";
+    QDir().mkpath(tmpDir);
+    QFile j(tmpDir + "/ony-plugin.json");
+    CHECK(j.open(QIODevice::WriteOnly | QIODevice::Text));
+    j.write("{\"id\":\"myplug\",\"name\":\"내 플러그인\",\"commands\":[{\"label\":\"테스트\",\"run\":\"echo hi\"}]}");
+    j.close();
+    CHECK(Plugins::installFromFolder(tmpDir).isEmpty());
+    bool found = false;
+    for (const Plugins::Plugin& p : Plugins::scan())
+        if (p.id == QStringLiteral("myplug")) found = p.commands.size() == 1 && p.name == QStringLiteral("내 플러그인");
+    CHECK(found);
+    CHECK(!Plugins::installFromFolder(tmpDir).isEmpty());        // 같은 이름은 거절
+    CHECK(!Plugins::installFromFolder("/tmp/demo").isEmpty());   // json 없는 폴더는 거절
+    CHECK(Plugins::removePlugin("myplug").isEmpty());
+    for (const Plugins::Plugin& p : Plugins::scan()) CHECK(p.id != QStringLiteral("myplug"));
+    CHECK(!Plugins::removePlugin("myplug").isEmpty());
+}
+
+static void testCompositeRegion() {
+    Document d;
+    d.newProject(QSize(120, 90), 3, 12);
+    d.addLayer("위");
+    QImage a(120, 90, QImage::Format_ARGB32_Premultiplied);
+    a.fill(Qt::transparent);
+    { QPainter p(&a); p.fillRect(0, 0, 120, 90, QColor(40, 90, 200)); }
+    QImage b = a;
+    { QPainter p(&b); p.fillRect(0, 0, 120, 90, Qt::transparent); p.setCompositionMode(QPainter::CompositionMode_Source); p.fillRect(10, 10, 40, 30, QColor(220, 40, 40)); }
+    d.pushKeyEdit(0, 0, QImage(), a, "a");
+    d.pushKeyEdit(1, 0, QImage(), b, "b");
+    const QImage full = d.composite(0, true, false);
+    // 일부만 다시 그려도 전체와 같아야 한다
+    QImage partial = full;
+    { QPainter p(&partial); p.setCompositionMode(QPainter::CompositionMode_Source); p.fillRect(20, 20, 50, 40, Qt::green); }
+    CHECK(partial != full);
+    CHECK(d.compositeRegion(partial, QRect(20, 20, 50, 40), 0, true));
+    CHECK(partial == full);
+    // 영역 밖은 건드리지 않는다
+    QImage keep = full;
+    { QPainter p(&keep); p.setCompositionMode(QPainter::CompositionMode_Source); p.fillRect(100, 70, 15, 15, Qt::green); }
+    CHECK(d.compositeRegion(keep, QRect(0, 0, 20, 20), 0, true));
+    CHECK(qGreen(keep.pixel(105, 75)) > 200 && qRed(keep.pixel(105, 75)) < 60);   // 밖은 그대로
+    CHECK(keep.pixel(5, 5) == full.pixel(5, 5));                                   // 안은 제대로
+    // 블렌딩 모드가 있으면 거절한다 (그때는 전체 합성을 써야 한다)
+    d.layer(1).blend = 11;
+    QImage x = full;
+    CHECK(!d.compositeRegion(x, QRect(0, 0, 20, 20), 0, true));
+    d.layer(1).blend = 0;
+    // 크기가 다르면 거절
+    QImage small(40, 40, QImage::Format_ARGB32_Premultiplied);
+    CHECK(!d.compositeRegion(small, QRect(0, 0, 10, 10), 0, true));
+    // FX 캐시를 써도 결과가 같다
+    d.addFx(1, {Effects::Type::Invert, 0});
+    const QImage f1 = d.composite(0, true, false);
+    const QImage f2 = d.composite(0, true, false);   // 두 번째는 캐시에서
+    CHECK(f1 == f2);
+    d.pushKeyEdit(1, 0, b, a, "바꿈");                // 그림이 바뀌면 캐시가 안 쓰인다
+    const QImage f3 = d.composite(0, true, false);
+    CHECK(f3 != f1);
+    d.undoStack()->undo();
+    CHECK(d.composite(0, true, false) == f1);
+}
+
+static void testInbetween() {
+    Document d;
+    d.newProject(QSize(120, 120), 7, 12);
+    auto circle = [&](int cx, int cy, int r) {
+        QImage im(120, 120, QImage::Format_ARGB32_Premultiplied);
+        im.fill(Qt::transparent);
+        QPainter p(&im);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setBrush(Qt::black);
+        p.setPen(Qt::NoPen);
+        p.drawEllipse(QPointF(cx, cy), r, r);
+        return im;
+    };
+    // 왼쪽 작은 원 → 오른쪽 큰 원
+    d.pushKeyEdit(0, 0, QImage(), circle(30, 60, 12), "a");
+    d.pushKeyEdit(0, 6, QImage(), circle(90, 60, 24), "b");
+    CHECK(d.keyIndexAt(0, 3) == 0);                 // 아직 사이는 홀드
+    const int made = d.makeInbetweens(0, 0, 6, 1, 0);
+    CHECK(made == 5);
+    CHECK(d.keyIndexAt(0, 3) == 3);                 // 사이가 키로 찼다
+    auto bounds = [](const QImage& im) {
+        int x0 = im.width(), x1 = -1;
+        for (int x = 0; x < im.width(); ++x)
+            if (qAlpha(im.pixel(x, 60)) > 128) { x0 = std::min(x0, x); x1 = std::max(x1, x); }
+        return QPair<int, int>(x0, x1);
+    };
+    const auto b0 = bounds(d.keyImage(0, 0)), b3 = bounds(d.keyImage(0, 3)), b6 = bounds(d.keyImage(0, 6));
+    // 중간 그림의 가운데와 크기가 양 끝 사이에 있다
+    const double c0 = (b0.first + b0.second) / 2.0, c3 = (b3.first + b3.second) / 2.0, c6 = (b6.first + b6.second) / 2.0;
+    CHECK(c3 > c0 + 10 && c3 < c6 - 10);
+    const int w0 = b0.second - b0.first, w3 = b3.second - b3.first, w6 = b6.second - b6.first;
+    // 가운데 프레임은 선이 끊기지 않게 살짝 두껍게 잡으므로, 양 끝 사이 ±선굵기 안에 들어오면 맞다
+    CHECK(w3 > w0 - 4 && w3 < w6 + 4);
+    CHECK(w3 > w0 && w6 > w3 - 8);
+    // 모프는 한 덩어리로 이어진다 (크로스페이드처럼 두 개로 갈라지지 않는다)
+    int runs = 0;
+    bool in = false;
+    for (int x = 0; x < 120; ++x) {
+        const bool on = qAlpha(d.keyImage(0, 3).pixel(x, 60)) > 128;
+        if (on && !in) ++runs;
+        in = on;
+    }
+    CHECK(runs == 1);
+    // 크로스페이드는 두 덩어리가 보인다
+    Document e;
+    e.newProject(QSize(120, 120), 7, 12);
+    e.pushKeyEdit(0, 0, QImage(), circle(30, 60, 12), "a");
+    e.pushKeyEdit(0, 6, QImage(), circle(90, 60, 24), "b");
+    CHECK(e.makeInbetweens(0, 0, 6, 2, 0) == 5);
+    int runs2 = 0;
+    in = false;
+    for (int x = 0; x < 120; ++x) {
+        const bool on = qAlpha(e.keyImage(0, 3).pixel(x, 60)) > 40;
+        if (on && !in) ++runs2;
+        in = on;
+    }
+    CHECK(runs2 == 2);
+    // 속도 곡선
+    CHECK(std::abs(Document::easeValue(0.5, 0) - 0.5) < 1e-9);
+    CHECK(Document::easeValue(0.5, 1) < 0.3);
+    CHECK(Document::easeValue(0.5, 2) > 0.7);
+    // 양 끝이 키가 아니면 거절
+    Document g;
+    g.newProject(QSize(40, 40), 5, 12);
+    CHECK(g.makeInbetweens(0, 0, 4, 1, 0) == 0);
+    // 벡터 보간
+    Document v;
+    v.newProject(QSize(120, 120), 5, 12);
+    v.setVectorLayer(0, true);
+    VecStroke s1, s2;
+    s1.pts = {QPointF(10, 20), QPointF(50, 20)};
+    s1.pressure = {1, 1};
+    s1.width = 4;
+    s2.pts = {QPointF(10, 100), QPointF(50, 100)};
+    s2.pressure = {1, 1};
+    s2.width = 20;
+    v.addVectorStroke(0, 0, s1);
+    v.setVectorStrokes(0, 4, {s2});          // 4번 프레임은 획 하나로 둔다
+    CHECK(v.vectorStrokeCount(0, 0) == 1 && v.vectorStrokeCount(0, 4) == 1);
+    CHECK(v.makeInbetweens(0, 0, 4, 0, 0) == 3);
+    const QVector<VecStroke>* mid = v.vectorStrokes(0, 2);
+    CHECK(mid && mid->size() == 1);
+    CHECK(std::abs(mid->first().pts[0].y() - 60) < 2);      // 20 과 100 의 가운데
+    CHECK(std::abs(mid->first().width - 12) < 1);           // 4 와 20 의 가운데
+    CHECK(qAlpha(v.keyImage(0, 2).pixel(30, 60)) > 100);
+    // 보간 함수 자체
+    const QVector<VecStroke> half = Document::interpolateStrokes({s1}, {s2}, 0.25);
+    CHECK(half.size() == 1 && std::abs(half[0].pts[0].y() - 40) < 2);
+}
+
+static void testVectorLayer(MainWindow& w) {
+    Document* d = w.document();
+    CanvasWidget* c = w.canvas();
+    d->newProject(QSize(200, 150), 6, 12);
+    c->zoomActual();
+    c->clearSelection();
+    c->setGuides(CanvasWidget::Guides());
+    c->setSymmetry(CanvasWidget::Symmetry());
+    c->setSmoothing(false);
+    CHECK(!d->isVectorLayer(0));
+    d->setVectorLayer(0, true);
+    CHECK(d->isVectorLayer(0));
+    // 벡터 레이어에 그리면 획이 저장된다
+    c->setColorA(Qt::black);
+    BrushParams bp; bp.size = 8; bp.preset = 0;
+    c->setBrush(bp);
+    c->setTool(CanvasWidget::Tool::Pen);
+    d->setCurrentFrame(1);
+    QTest::mousePress(c, Qt::LeftButton, {}, imgToWidget(c, d, {20, 40}));
+    for (int x = 40; x <= 160; x += 20) QTest::mouseMove(c, imgToWidget(c, d, {x, 40}));
+    QTest::mouseRelease(c, Qt::LeftButton, {}, imgToWidget(c, d, {160, 40}));
+    CHECK(d->vectorStrokeCount(0, 1) == 1);
+    const QVector<VecStroke>* sv = d->vectorStrokes(0, 1);
+    CHECK(sv && sv->first().pts.size() >= 4);
+    CHECK(std::abs(sv->first().width - 8) < 1e-9);
+    // 그려진 그림도 생긴다
+    CHECK(qAlpha(d->keyImage(0, d->keyIndexAt(0, 1)).pixel(90, 40)) > 100);
+    CHECK(qAlpha(d->keyImage(0, d->keyIndexAt(0, 1)).pixel(90, 110)) == 0);
+    // 굵기를 바꾸면 다시 그려진다
+    QVector<VecStroke> mod = *sv;
+    mod[0].width = 30;
+    d->setVectorStrokes(0, 1, mod);
+    CHECK(qAlpha(d->keyImage(0, d->keyIndexAt(0, 1)).pixel(90, 52)) > 100);   // 두꺼워져서 아래까지 닿는다
+    // 점을 옮기면 모양이 바뀐다
+    mod[0].width = 8;
+    mod[0].pts[1] = QPointF(mod[0].pts[1].x(), 110);
+    d->setVectorStrokes(0, 1, mod);
+    CHECK(qAlpha(d->keyImage(0, d->keyIndexAt(0, 1)).pixel(int(mod[0].pts[1].x()), 110)) > 100);
+    // 두 번째 획을 더한다
+    VecStroke s2;
+    s2.pts = {QPointF(20, 120), QPointF(170, 120)};
+    s2.pressure = {1.0f, 1.0f};
+    s2.color = Qt::red;
+    s2.width = 6;
+    d->addVectorStroke(0, 1, s2);
+    CHECK(d->vectorStrokeCount(0, 1) == 2);
+    CHECK(qRed(d->keyImage(0, d->keyIndexAt(0, 1)).pixel(100, 120)) > 180);
+    // 저장 / 불러오기
+    CHECK(d->saveCopy("/tmp/demo/vec.ony"));
+    Document e;
+    CHECK(e.load("/tmp/demo/vec.ony"));
+    CHECK(e.isVectorLayer(0) && e.vectorStrokeCount(0, 1) == 2);
+    CHECK(e.vectorStrokes(0, 1)->at(1).color == QColor(Qt::red));
+    // 그림으로 굳히면 벡터는 사라지고 그림은 남는다
+    const QImage before = d->keyImage(0, d->keyIndexAt(0, 1));
+    d->flattenVectorLayer(0);
+    CHECK(!d->isVectorLayer(0));
+    CHECK(d->vectorStrokeCount(0, 1) == 0);
+    CHECK(d->keyImage(0, d->keyIndexAt(0, 1)).size() == before.size());
+    CHECK(qAlpha(d->keyImage(0, d->keyIndexAt(0, 1)).pixel(100, 120)) > 100);
+    // 보통 레이어에 그리면 벡터로 저장되지 않는다
+    d->newProject(QSize(100, 80), 4, 12);
+    QTest::mousePress(c, Qt::LeftButton, {}, imgToWidget(c, d, {10, 10}));
+    QTest::mouseRelease(c, Qt::LeftButton, {}, imgToWidget(c, d, {40, 40}));
+    CHECK(d->vectorStrokeCount(0, 0) == 0);
+}
+
+static void testScriptEngine(MainWindow& w) {
+    Document* d = w.document();
+    d->newProject(QSize(100, 80), 10, 12);
+    ScriptEngine e(d);
+    // 변수와 식
+    e.run("set a = 2 + 3 * 4\nset b = (a - 2) / 3");
+    CHECK(std::abs(e.var("a") - 14) < 1e-9);
+    CHECK(std::abs(e.var("b") - 4) < 1e-9);
+    e.run("set c = max(3, 7) + min(2, 9) + abs(-5) + int(2.9)");
+    CHECK(std::abs(e.var("c") - (7 + 2 + 5 + 2)) < 1e-9);
+    e.run("set t = 5 > 3 and 2 != 2");
+    CHECK(e.var("t") == 0);
+    e.run("set t2 = 5 > 3 or 2 != 2");
+    CHECK(e.var("t2") == 1);
+    // for
+    e.run("set s = 0\nfor i = 1 to 5\n  set s = $s + $i\nend");
+    CHECK(std::abs(e.var("s") - 15) < 1e-9);
+    // for step
+    e.run("set s2 = 0\nfor i = 0 to 10 step 5\n  set s2 = $s2 + 1\nend");
+    CHECK(std::abs(e.var("s2") - 3) < 1e-9);
+    // while
+    e.run("set n = 0\nwhile $n < 4\n  set n = $n + 1\nend");
+    CHECK(std::abs(e.var("n") - 4) < 1e-9);
+    // if / else
+    e.run("set r = 0\nif 1 > 2\n  set r = 1\nelse\n  set r = 2\nend");
+    CHECK(std::abs(e.var("r") - 2) < 1e-9);
+    // 중첩
+    e.run("set tot = 0\nfor i = 1 to 3\n  for j = 1 to 3\n    if $i == $j\n      set tot = $tot + 1\n    end\n  end\nend");
+    CHECK(std::abs(e.var("tot") - 3) < 1e-9);
+    // 무한 반복은 멈춘다
+    const QString stop = e.run("while 1 > 0\n  set x = 1\nend");
+    CHECK(stop.contains("오래") || stop.contains("너무"));
+    // 문서를 실제로 바꾼다
+    e.run("layer.new 배경\nframe 3\nrect 10 10 40 30 #ff0000");
+    CHECK(d->layerCount() == 2);
+    CHECK(d->currentFrame() == 2);
+    CHECK(qRed(d->keyImage(d->currentLayer(), d->keyIndexAt(d->currentLayer(), 2)).pixel(20, 20)) > 200);
+    // get 으로 값을 읽는다
+    e.run("get f frames\nget lc layers\nget wdt width");
+    CHECK(std::abs(e.var("f") - 10) < 1e-9);
+    CHECK(std::abs(e.var("lc") - 2) < 1e-9);
+    CHECK(std::abs(e.var("wdt") - 100) < 1e-9);
+    // 효과 명령
+    e.run("fx.invert");
+    CHECK(qRed(d->keyImage(d->currentLayer(), d->keyIndexAt(d->currentLayer(), 2)).pixel(20, 20)) < 60);
+    e.run("fx.sepia\nfx.posterize 4\nfx.sharpen 120\nfx.levels 20");
+    // 호스트 명령 (창 기능)
+    e.setHost([&w](const QStringList& t) { return w.scriptHostCommand(t); });
+    const QString hl = e.run("select.rect 5 5 40 30\nmsg 테스트");
+    CHECK(!hl.contains("알 수 없는"));
+    CHECK(w.canvas()->selection() == QRect(5, 5, 40, 30));
+    e.run("select.none");
+    CHECK(w.canvas()->selection().isNull());
+    // 모르는 명령은 알려 준다
+    CHECK(e.run("하늘에서별이").contains("알 수 없는"));
+    CHECK(ScriptEngine::help().contains("while"));
+    d->newProject(QSize(120, 90), 4, 12);
+}
+
+static void testLibraryAndPanel() {
+    Document d;
+    d.newProject(QSize(40, 40), 2, 12);
+    QImage a(40, 40, QImage::Format_ARGB32_Premultiplied);
+    a.fill(Qt::red);
+    const int i0 = d.addToLibrary("빨강 배경", a);
+    a.fill(Qt::blue);
+    const int i1 = d.addToLibrary("파랑 배경", a);
+    a.fill(Qt::green);
+    const int i2 = d.addToLibrary("초록 소품", a);
+    CHECK(d.libraryCount() == 3);
+    CHECK(d.libraryCategory(i0).isEmpty());
+    d.setLibraryCategory(i0, "배경");
+    d.setLibraryCategory(i1, "배경");
+    d.setLibraryCategory(i2, "소품");
+    CHECK(d.libraryCategories() == QStringList({"배경", "소품"}));
+    d.setLibraryName(i2, "초록 나무");
+    CHECK(d.libraryName(i2) == QStringLiteral("초록 나무"));
+    // 저장/불러오기에 분류가 따라간다
+    CHECK(d.saveCopy("/tmp/demo/lib.ony"));
+    Document e;
+    CHECK(e.load("/tmp/demo/lib.ony"));
+    CHECK(e.libraryCount() == 3 && e.libraryCategory(1) == QStringLiteral("배경"));
+    CHECK(e.libraryName(2) == QStringLiteral("초록 나무"));
+    // 삭제하면 분류도 같이 빠진다
+    e.removeFromLibrary(0);
+    CHECK(e.libraryCount() == 2 && e.libraryCategory(0) == QStringLiteral("배경") && e.libraryName(0) == QStringLiteral("파랑 배경"));
+
+    // 사용자 패널 자유 배치
+    CustomPanelDef def;
+    def.name = "내 패널";
+    def.labels = {"하나", "둘"};
+    def.scripts = {"echo 1", "echo 2"};
+    CustomPanel panel(&d, def);
+    panel.resize(240, 200);
+    CHECK(!panel.editing());
+    panel.setEditing(true);
+    CHECK(panel.editing());
+    CustomPanelDef got;
+    QObject::connect(&panel, &CustomPanel::layoutChanged, [&got](const CustomPanelDef& x) { got = x; });
+    panel.autoArrange();
+    CHECK(got.geoms.size() == 2);
+    const QStringList p0 = got.geoms[0].split(',');
+    CHECK(p0.size() == 4);
+    // 저장된 배치가 다시 읽힌다
+    CustomPanelDef def2 = def;
+    def2.geoms = {"20,60,80,24", "120,90,60,30"};
+    CustomPanel panel2(&d, def2);
+    panel2.resize(240, 200);
+    CHECK(panel2.def().geoms == def2.geoms);
+}
+
+static void testDemo5Basics(MainWindow& w) {
+    Document* d = w.document();
+    CanvasWidget* c = w.canvas();
+    d->newProject(QSize(120, 90), 4, 12);
+    c->zoomActual();
+    c->setGuides(CanvasWidget::Guides());
+    c->setSymmetry(CanvasWidget::Symmetry());
+    // --- 선택 키우기 / 줄이기 / 부드럽게 ---
+    c->setSelectionRect(QRect(40, 30, 30, 24));
+    CHECK(c->selection() == QRect(40, 30, 30, 24));
+    c->growSelection(5);
+    QRect g = c->selection();
+    CHECK(g.width() > 36 && g.height() > 30);          // 사방으로 커졌다
+    CHECK(g.left() < 40 && g.top() < 30);
+    c->setSelectionRect(QRect(40, 30, 30, 24));
+    c->growSelection(-5);
+    QRect sh = c->selection();
+    CHECK(sh.width() < 26 && sh.height() < 20);        // 줄었다
+    c->setSelectionRect(QRect(40, 30, 30, 24));
+    CHECK(!c->selectionFeathered());
+    c->featherSelection(6);
+    CHECK(c->selectionFeathered());
+    {   // 가장자리는 반투명, 가운데는 불투명
+        const QImage m = c->selectionMask();
+        CHECK(!m.isNull());
+        CHECK(qAlpha(m.pixel(55, 42)) > 200);
+        const int edge = qAlpha(m.pixel(40, 42));
+        CHECK(edge > 20 && edge < 220);
+    }
+    // 부드러운 선택으로 지우면 가장자리가 반쯤 지워진다
+    QImage full(120, 90, QImage::Format_ARGB32_Premultiplied);
+    full.fill(Qt::black);
+    d->pushKeyEdit(0, 0, QImage(), full, "fill");
+    c->clearCurrent();
+    const QImage after = d->keyImage(0, 0);
+    CHECK(qAlpha(after.pixel(55, 42)) < 40);           // 가운데는 거의 다 지워지고
+    const int e2 = qAlpha(after.pixel(38, 42));
+    CHECK(e2 > 40 && e2 < 250);                        // 가장자리는 반쯤 남는다
+    d->undoStack()->undo();
+    c->clearSelection();
+
+    // --- 안정화 세기 ---
+    CHECK(c->smoothingStrength() == 60);
+    c->setSmoothingStrength(90);
+    CHECK(c->smoothingStrength() == 90);
+    c->setSmoothingStrength(500);
+    CHECK(c->smoothingStrength() == 99);               // 범위를 넘으면 잘린다
+    c->setSmoothing(true);
+    BrushParams bp; bp.size = 4; bp.preset = 0;
+    c->setBrush(bp);
+    c->setColorA(Qt::black);
+    c->setTool(CanvasWidget::Tool::Pen);
+    d->newProject(QSize(200, 120), 4, 12);
+    c->zoomActual();
+    // 세기가 높을수록 떨리는 손놀림이 매끄럽게 펴진다
+    auto jitterSpread = [&](int strength) {
+        c->setSmoothingStrength(strength);
+        QTest::mousePress(c, Qt::LeftButton, {}, imgToWidget(c, d, {20, 60}));
+        for (int i = 1; i <= 16; ++i)             // 위아래로 흔들면서 간다
+            QTest::mouseMove(c, imgToWidget(c, d, {20 + i * 10, 60 + ((i % 2) ? 14 : -14)}));
+        QTest::mouseRelease(c, Qt::LeftButton, {}, imgToWidget(c, d, {180, 60}));
+        const QImage im = d->keyImage(0, 0);
+        int top = im.height(), bottom = -1;        // 획이 세로로 번진 폭
+        for (int y = 0; y < im.height(); ++y)
+            for (int x = 40; x < 160; ++x)
+                if (qAlpha(im.pixel(x, y)) > 100) {
+                    top = std::min(top, y);
+                    bottom = std::max(bottom, y);
+                    break;
+                }
+        d->undoStack()->undo();
+        return bottom - top;
+    };
+    const int weak = jitterSpread(5), strong = jitterSpread(95);
+    CHECK(weak > strong);                          // 보정이 세면 덜 흔들린다
+    CHECK(strong >= 0);
+    c->setSmoothing(false);
+    c->setSmoothingStrength(60);
+
+    // --- 커브 / 레벨 ---
+    QImage grey(32, 32, QImage::Format_ARGB32_Premultiplied);
+    grey.fill(QColor(128, 128, 128));
+    QVector<int> up(256), same(256);
+    for (int i = 0; i < 256; ++i) { up[i] = std::min(255, i + 60); same[i] = i; }
+    const QImage br = Effects::curves(grey, up, up, up);
+    CHECK(qRed(br.pixel(1, 1)) == 188);
+    const QImage onlyR = Effects::curves(grey, up, same, same);
+    CHECK(qRed(onlyR.pixel(1, 1)) == 188 && qGreen(onlyR.pixel(1, 1)) == 128);
+    // 레벨: 입력 범위를 좁히면 대비가 커진다
+    const QImage lv = Effects::levels(grey, 100, 150, 1.0, 0, 255);
+    CHECK(qRed(lv.pixel(1, 1)) > 130 && qRed(lv.pixel(1, 1)) < 160);
+    const QImage dark = Effects::levels(grey, 0, 255, 0.5, 0, 255);
+    CHECK(qRed(dark.pixel(1, 1)) < 100);               // 감마를 내리면 어두워진다
+    // 커브 위젯의 보정표
+    CurveWidget cw;
+    QVector<int> l0 = cw.lut();
+    CHECK(l0[0] == 0 && l0[255] == 255 && l0[128] == 128);
+    cw.setPoints({QPointF(0, 0), QPointF(0.5, 0.9), QPointF(1, 1)});
+    const QVector<int> l1 = cw.lut();
+    CHECK(l1[128] > 200 && l1[0] == 0 && l1[255] == 255);
+    // FX 스택에도 들어간다
+    CHECK(Effects::categoryOf(Effects::Type::Curves) == QStringLiteral("색"));
+    CHECK(!Effects::typeName(Effects::Type::Levels).isEmpty());
+    CHECK(Effects::apply(grey, {Effects::Type::Levels, 30}).size() == grey.size());
+
+    // --- PSD 블렌딩 모드 ---
+    CHECK(Psd::blendKeyFromOny(11) == QByteArray("mul "));      // 곱하기
+    CHECK(Psd::onyModeFromBlendKey("mul ") == 11);
+    CHECK(Psd::blendKeyFromOny(12) == QByteArray("scrn"));
+    CHECK(Psd::onyModeFromBlendKey("zzzz") == 0);               // 모르는 키는 일반
+    QVector<Psd::LayerData> ls;
+    for (int i = 0; i < 2; ++i) {
+        Psd::LayerData ld;
+        ld.name = QString("L%1").arg(i);
+        ld.blend = i == 0 ? QByteArray("norm") : QByteArray("mul ");
+        QImage im(40, 30, QImage::Format_ARGB32_Premultiplied);
+        im.fill(QColor(100 + i * 50, 80, 60));
+        ld.image = im;
+        ls.push_back(ld);
+    }
+    CHECK(Psd::write("/tmp/demo/blend.psd", QSize(40, 30), ls, QImage()).isEmpty());
+    Psd::File pf;
+    CHECK(Psd::read("/tmp/demo/blend.psd", &pf).isEmpty());
+    CHECK(pf.layers.size() == 2);
+    CHECK(pf.layers[0].blend == QByteArray("norm") && pf.layers[1].blend == QByteArray("mul "));
+}
+
+static void testPsdRoundTrip() {
+    QSize sz(70, 50);
+    QVector<Psd::LayerData> ls;
+    for (int i = 0; i < 3; ++i) {
+        Psd::LayerData l;
+        l.name = QString("레이어 %1").arg(i + 1);
+        l.opacity = i == 1 ? 128 : 255;
+        l.visible = i != 2;
+        QImage im(sz, QImage::Format_ARGB32_Premultiplied);
+        im.fill(Qt::transparent);
+        QPainter p(&im);
+        p.fillRect(5 + i * 15, 5 + i * 8, 24, 20, QColor(i == 0 ? 220 : 30, i == 1 ? 200 : 40, i == 2 ? 210 : 50));
+        p.end();
+        l.image = im;
+        ls.push_back(l);
+    }
+    CHECK(Psd::write("/tmp/demo/rt.psd", sz, ls, QImage()).isEmpty());
+    CHECK(QFileInfo("/tmp/demo/rt.psd").size() > 500);
+    Psd::File f;
+    CHECK(Psd::read("/tmp/demo/rt.psd", &f).isEmpty());
+    CHECK(f.size == sz && f.layers.size() == 3 && !f.merged.isNull());
+    CHECK(f.layers[0].name == QStringLiteral("레이어 1"));   // 유니코드 이름이 그대로 온다
+    CHECK(f.layers[1].opacity == 128 && f.layers[2].visible == false);
+    for (int i = 0; i < 3; ++i) {
+        const QImage a = ls[i].image.convertToFormat(QImage::Format_ARGB32);
+        const QImage b = f.layers[i].image.convertToFormat(QImage::Format_ARGB32);
+        int diff = 0;
+        for (int y = 0; y < sz.height(); ++y)
+            for (int x = 0; x < sz.width(); ++x) diff += a.pixel(x, y) != b.pixel(x, y);
+        CHECK(diff == 0);                                     // 픽셀이 한 점도 안 틀린다
+    }
+    // 합쳐진 그림도 맞다 (보이는 레이어만, 불투명도 반영)
+    CHECK(qAlpha(f.merged.pixel(10, 10)) == 255);
+    // PSD 가 아닌 파일은 이유를 말한다
+    QFile bad("/tmp/demo/notpsd.psd");
+    CHECK(bad.open(QIODevice::WriteOnly));
+    bad.write("hello world, not a psd at all");
+    bad.close();
+    Psd::File g;
+    CHECK(Psd::read("/tmp/demo/notpsd.psd", &g) == QStringLiteral("PSD 파일이 아닙니다."));
+}
+
+static void testVideoImport(MainWindow& w) {
+    if (VideoExport::findFfmpeg().isEmpty()) return;    // ffmpeg 이 없으면 건너뛴다
+    if (!QFileInfo::exists("/tmp/demo/vid.mp4")) return;
+    const VideoInfo info = VideoExport::probe("/tmp/demo/vid.mp4");
+    CHECK(info.ok && info.size == QSize(160, 120));
+    CHECK(info.duration > 1.5 && info.duration < 2.5);
+    CHECK(info.hasAudio);
+    QTemporaryDir td;
+    CHECK(td.isValid());
+    ImportOptions io;
+    io.fps = 5;
+    io.maxFrames = 20;
+    QStringList files;
+    CHECK(VideoExport::extractFrames("/tmp/demo/vid.mp4", td.path(), io, &files).isEmpty());
+    CHECK(files.size() >= 8 && files.size() <= 20);
+    CHECK(QImage(files[0]).size() == QSize(160, 120));
+    // 소리 파형
+    const QVector<float> peaks = VideoExport::audioPeaks("/tmp/demo/vid.mp4", 100);
+    CHECK(peaks.size() == 100);
+    float mx = 0;
+    for (float v : peaks) mx = std::max(mx, v);
+    CHECK(mx > 0.05f);                                  // 사인파라 또렷한 값이 나온다
+    int nonzero = 0;
+    for (float v : peaks) nonzero += v > 0.01f;
+    CHECK(nonzero > 80);
+    CHECK(VideoExport::audioPeaks("/tmp/demo/없는파일.wav", 50).isEmpty());
+    // 두 단계 내보내기 (백그라운드 내보내기가 쓰는 길)
+    Document* d = w.document();
+    d->newProject(QSize(64, 48), 6, 12);
+    QImage im(64, 48, QImage::Format_ARGB32_Premultiplied);
+    im.fill(Qt::red);
+    d->pushKeyEdit(0, 0, QImage(), im, "r");
+    QTemporaryDir rd;
+    VideoOptions vo;
+    vo.format = "mp4";
+    CHECK(VideoExport::renderFrames(d, rd.path(), vo).isEmpty());
+    CHECK(QDir(rd.path()).entryList({"frame_*.png"}, QDir::Files).size() == 6);
+    CHECK(VideoExport::encodeFrames(rd.path(), "/tmp/demo/two_stage.mp4", vo, 12, QString(), 0).isEmpty());
+    CHECK(QFileInfo("/tmp/demo/two_stage.mp4").size() > 500);
+}
+
 static void testRenderPrintPublish(MainWindow& w) {
     Document* d = w.document();
     d->newProject(QSize(160, 100), 6, 12);
@@ -867,6 +1629,259 @@ static void testRenderPrintPublish(MainWindow& w) {
     CHECK(QFileInfo("/tmp/demo/pub/퍼블리시_정보.txt").exists());
     d->newProject(QSize(320, 200), 12, 24);
     CHECK(d->renderSize() == QSize(320, 200));    // 새 프로젝트는 렌더 카메라가 꺼진다
+}
+
+static void testFrameEditing() {
+    Document d;
+    d.newProject(QSize(40, 40), 8, 12);
+    d.addLayer("B");
+    auto mk = [&](int v) {
+        QImage im(40, 40, QImage::Format_ARGB32_Premultiplied);
+        im.fill(QColor(v, v, v, 255));
+        return im;
+    };
+    // 레이어 0: 0,2,4 에 키 / 레이어 1: 1 에 키
+    d.pushKeyEdit(0, 0, QImage(), mk(10), "a");
+    d.pushKeyEdit(0, 2, QImage(), mk(20), "b");
+    d.pushKeyEdit(0, 4, QImage(), mk(30), "c");
+    d.pushKeyEdit(1, 1, QImage(), mk(40), "d");
+    const int n0 = d.frameCount();
+    // 복사: 홀드로 시작하는 구간도 보이던 그림을 이어받는다
+    FrameClip c = d.copyFrames(0, 1, 3, false);
+    CHECK(c.count == 3 && c.data.size() == 1);
+    CHECK(!c.data[0][0].isNull() && qRed(c.data[0][0].pixel(0, 0)) == 10);  // 1번은 홀드 → 0번 그림
+    CHECK(!c.data[0][1].isNull() && qRed(c.data[0][1].pixel(0, 0)) == 20);
+    CHECK(c.data[0][2].isNull());
+    // 끼워 넣기: 길이가 늘고 모든 레이어가 같이 밀린다
+    CHECK(d.pasteFrames(0, 6, c, true));
+    CHECK(d.frameCount() == n0 + 3);
+    CHECK(qRed(d.keyImage(0, d.resolveKey(0, 6)).pixel(0, 0)) == 10);
+    CHECK(qRed(d.keyImage(0, d.resolveKey(0, 7)).pixel(0, 0)) == 20);
+    CHECK(d.keyIndexAt(1, 1) == 1);   // 다른 레이어의 키는 자리 유지
+    // 덮어쓰기
+    CHECK(d.pasteFrames(0, 0, c, false));
+    CHECK(d.frameCount() == n0 + 3);
+    CHECK(qRed(d.keyImage(0, 0).pixel(0, 0)) == 10 && qRed(d.keyImage(0, 1).pixel(0, 0)) == 20);
+    // 내용만 지우기: 길이는 그대로
+    const int before = d.frameCount();
+    CHECK(d.deleteFrames(0, 0, 1, false, false));
+    CHECK(d.frameCount() == before && d.keyIndexAt(0, 0) == -1);
+    // 당겨서 삭제: 길이가 준다
+    CHECK(d.deleteFrames(0, 0, 2, true, true));
+    CHECK(d.frameCount() == before - 3);
+    CHECK(!d.deleteFrames(0, 0, d.frameCount() - 1, true, true));   // 전부 삭제는 거절
+    // 옮기기: 길이는 그대로
+    Document e;
+    e.newProject(QSize(20, 20), 6, 12);
+    for (int f = 0; f < 6; ++f) {
+        QImage im(20, 20, QImage::Format_ARGB32_Premultiplied);
+        im.fill(QColor(f * 20, 0, 0, 255));
+        e.pushKeyEdit(0, f, QImage(), im, "f");
+    }
+    CHECK(e.moveFrames(0, 0, 1, 6, false));
+    CHECK(e.frameCount() == 6);
+    CHECK(qRed(e.keyImage(0, 0).pixel(0, 0)) == 40);     // 2번이 맨 앞으로
+    CHECK(qRed(e.keyImage(0, 4).pixel(0, 0)) == 0);      // 0,1 번이 뒤로
+    CHECK(qRed(e.keyImage(0, 5).pixel(0, 0)) == 20);
+    CHECK(!e.moveFrames(0, 0, 1, 1, false));             // 제자리는 거절
+    // 캔버스 크기가 다르면 붙지 않는다
+    Document g;
+    g.newProject(QSize(32, 32), 4, 12);
+    CHECK(!g.pasteFrames(0, 0, c, true));
+}
+
+static void testNestedFolders() {
+    Document d;
+    d.newProject(QSize(32, 32), 2, 12);
+    d.addLayer("안쪽");
+    const int outer = d.addFolder("바깥");
+    const int inner = d.addFolder("안");
+    d.setFolderParent(inner, outer);
+    CHECK(d.folderDepth(inner) == 1 && d.folderDepth(outer) == 0);
+    CHECK(d.folderPath(inner) == QStringLiteral("바깥 / 안"));
+    d.setLayerFolder(1, inner);
+    QImage im(32, 32, QImage::Format_ARGB32_Premultiplied);
+    im.fill(Qt::black);
+    d.pushKeyEdit(1, 0, QImage(), im, "x");
+    CHECK(qAlpha(d.composite(0, false, false).pixel(5, 5)) == 255);
+    d.folder(outer).visible = false;                       // 바깥을 숨기면 안쪽 레이어도 숨는다
+    CHECK(!d.folderVisibleEffective(inner));
+    CHECK(qAlpha(d.composite(0, false, false).pixel(5, 5)) == 0);
+    d.folder(outer).visible = true;
+    d.folder(outer).opacity = 0.5;
+    d.folder(inner).opacity = 0.5;
+    CHECK(std::abs(d.folderOpacityEffective(inner) - 0.25) < 1e-6);
+    const int a = qAlpha(d.composite(0, false, false).pixel(5, 5));
+    CHECK(a > 50 && a < 80);
+    // 순환 연결은 거절
+    d.setFolderParent(outer, inner);
+    CHECK(d.folder(outer).parent == -1);
+    // 저장/불러오기
+    CHECK(d.saveCopy("/tmp/demo/folders.ony"));
+    Document e;
+    CHECK(e.load("/tmp/demo/folders.ony"));
+    CHECK(e.folder(inner).parent == outer);
+    CHECK(e.folderPath(inner) == QStringLiteral("바깥 / 안"));
+}
+
+static void testSelectAndPick(MainWindow& w) {
+    Document* d = w.document();
+    CanvasWidget* c = w.canvas();
+    d->newProject(QSize(200, 120), 4, 12);
+    QImage im(200, 120, QImage::Format_ARGB32_Premultiplied);
+    im.fill(Qt::transparent);
+    { QPainter p(&im); p.fillRect(10, 10, 60, 40, QColor(220, 40, 40)); p.fillRect(120, 60, 50, 40, QColor(40, 90, 220)); }
+    d->pushKeyEdit(0, 0, QImage(), im, "two");
+    d->setCurrentFrame(0);
+    // 색 추출
+    QColor got;
+    auto conn = QObject::connect(c, &CanvasWidget::colorPicked, [&](const QColor& x) { got = x; });
+    c->setTool(CanvasWidget::Tool::Pick);
+    c->zoomActual();
+    QTest::mouseClick(c, Qt::LeftButton, {}, imgToWidget(c, d, {30, 30}));
+    CHECK(got == QColor(220, 40, 40));
+    QTest::mouseClick(c, Qt::LeftButton, {}, imgToWidget(c, d, {140, 80}));
+    CHECK(got == QColor(40, 90, 220));
+    QObject::disconnect(conn);
+    // 마술봉: 빨간 사각형만 잡힌다
+    c->setTool(CanvasWidget::Tool::Wand);
+    c->setWandTolerance(20);
+    QTest::mouseClick(c, Qt::LeftButton, {}, imgToWidget(c, d, {30, 30}));
+    CHECK(c->selection() == QRect(10, 10, 60, 40));
+    CHECK(!c->selectionMask().isNull());
+    CHECK(qAlpha(c->selectionMask().pixel(30, 30)) > 128);
+    CHECK(qAlpha(c->selectionMask().pixel(140, 80)) < 128);
+    // Shift 로 파란 사각형 더하기
+    QTest::mouseClick(c, Qt::LeftButton, Qt::ShiftModifier, imgToWidget(c, d, {140, 80}));
+    CHECK(c->selection() == QRect(10, 10, 160, 90));
+    CHECK(qAlpha(c->selectionMask().pixel(30, 30)) > 128 && qAlpha(c->selectionMask().pixel(140, 80)) > 128);
+    // 선택 반전
+    c->invertSelection();
+    CHECK(qAlpha(c->selectionMask().pixel(30, 30)) < 128);
+    CHECK(qAlpha(c->selectionMask().pixel(95, 20)) > 128);
+    // 선택 영역만 지우기 (마스크 모양대로)
+    c->setTool(CanvasWidget::Tool::Wand);
+    QTest::mouseClick(c, Qt::LeftButton, {}, imgToWidget(c, d, {30, 30}));
+    c->clearCurrent();
+    const QImage after = d->keyImage(0, 0);
+    CHECK(qAlpha(after.pixel(30, 30)) == 0);          // 빨간 곳은 지워지고
+    CHECK(qAlpha(after.pixel(140, 80)) == 255);        // 파란 곳은 남는다
+    d->undoStack()->undo();
+    // 올가미: 드래그로 삼각형 모양 선택
+    c->clearSelection();
+    c->setTool(CanvasWidget::Tool::Lasso);
+    QTest::mousePress(c, Qt::LeftButton, {}, imgToWidget(c, d, {20, 20}));
+    QTest::mouseMove(c, imgToWidget(c, d, {90, 20}));
+    QTest::mouseMove(c, imgToWidget(c, d, {90, 90}));
+    QTest::mouseRelease(c, Qt::LeftButton, {}, imgToWidget(c, d, {90, 90}));
+    CHECK(!c->selectionMask().isNull());
+    CHECK(qAlpha(c->selectionMask().pixel(80, 40)) > 128);   // 삼각형 안
+    CHECK(qAlpha(c->selectionMask().pixel(30, 80)) < 128);   // 삼각형 밖
+    c->clearSelection();
+    CHECK(c->selection().isNull());
+}
+
+static void testGradientTextSymmetry(MainWindow& w) {
+    Document* d = w.document();
+    CanvasWidget* c = w.canvas();
+    d->newProject(QSize(200, 120), 4, 12);
+    c->zoomActual();
+    c->clearSelection();
+    QImage blank(200, 120, QImage::Format_ARGB32_Premultiplied);
+    blank.fill(Qt::transparent);
+    d->pushKeyEdit(0, 0, QImage(), blank, "blank");
+    // 그라디언트
+    c->setColorA(Qt::black);
+    c->setColorB(Qt::white);
+    c->setTool(CanvasWidget::Tool::Gradient);
+    QTest::mousePress(c, Qt::LeftButton, {}, imgToWidget(c, d, {0, 60}));
+    QTest::mouseMove(c, imgToWidget(c, d, {100, 60}));
+    QTest::mouseRelease(c, Qt::LeftButton, {}, imgToWidget(c, d, {199, 60}));
+    const QImage g = d->keyImage(0, 0);
+    CHECK(qRed(g.pixel(5, 60)) < 40 && qRed(g.pixel(195, 60)) > 215);
+    CHECK(qRed(g.pixel(100, 60)) > 90 && qRed(g.pixel(100, 60)) < 170);
+    d->undoStack()->undo();
+    // 글자
+    CanvasWidget::TextParams tp;
+    tp.text = "A";
+    tp.size = 60;
+    c->setTextParams(tp);
+    c->setColorA(Qt::black);
+    c->setTool(CanvasWidget::Tool::Text);
+    QTest::mouseClick(c, Qt::LeftButton, {}, imgToWidget(c, d, {40, 90}));
+    int ink = 0;
+    const QImage t = d->keyImage(0, 0);
+    for (int y = 0; y < t.height(); ++y)
+        for (int x = 0; x < t.width(); ++x) ink += qAlpha(t.pixel(x, y)) > 128 ? 1 : 0;
+    CHECK(ink > 200);
+    d->undoStack()->undo();
+    // 대칭: 왼쪽에 그으면 오른쪽에도 생긴다
+    CanvasWidget::Symmetry sy;
+    sy.on = true;
+    sy.vertical = true;
+    c->setSymmetry(sy);
+    BrushParams bp; bp.size = 8; bp.preset = 0;
+    c->setBrush(bp);
+    c->setTool(CanvasWidget::Tool::Pen);
+    QTest::mousePress(c, Qt::LeftButton, {}, imgToWidget(c, d, {30, 60}));
+    QTest::mouseMove(c, imgToWidget(c, d, {60, 60}));
+    QTest::mouseRelease(c, Qt::LeftButton, {}, imgToWidget(c, d, {60, 60}));
+    const QImage s2 = d->keyImage(0, 0);
+    CHECK(qAlpha(s2.pixel(45, 60)) > 100);          // 왼쪽 획
+    CHECK(qAlpha(s2.pixel(200 - 45, 60)) > 100);    // 거울상
+    sy.on = false;
+    c->setSymmetry(sy);
+    d->undoStack()->undo();
+}
+
+static void testRulerGuides(MainWindow& w) {
+    Document* d = w.document();
+    CanvasWidget* c = w.canvas();
+    d->newProject(QSize(200, 120), 4, 12);
+    c->zoomActual();
+    c->clearSelection();
+    c->setColorA(Qt::black);
+    BrushParams bp; bp.size = 6; bp.preset = 0;
+    c->setBrush(bp);
+    c->setTool(CanvasWidget::Tool::Pen);
+    // 직선자(수평·수직): 비스듬히 그어도 가로로 펴진다
+    CanvasWidget::Guides g;
+    g.ruler = 1;
+    c->setGuides(g);
+    QTest::mousePress(c, Qt::LeftButton, {}, imgToWidget(c, d, {20, 60}));
+    QTest::mouseMove(c, imgToWidget(c, d, {80, 75}));
+    QTest::mouseRelease(c, Qt::LeftButton, {}, imgToWidget(c, d, {80, 75}));
+    const QImage r = d->keyImage(0, 0);
+    CHECK(qAlpha(r.pixel(60, 60)) > 100);     // 시작점과 같은 높이
+    CHECK(qAlpha(r.pixel(60, 75)) < 60);      // 비스듬한 자리에는 없다
+    d->undoStack()->undo();
+    // 각도 지정
+    g.ruler = 2;
+    g.rulerAngle = 90;
+    c->setGuides(g);
+    QTest::mousePress(c, Qt::LeftButton, {}, imgToWidget(c, d, {100, 20}));
+    QTest::mouseMove(c, imgToWidget(c, d, {130, 80}));
+    QTest::mouseRelease(c, Qt::LeftButton, {}, imgToWidget(c, d, {130, 80}));
+    const QImage v = d->keyImage(0, 0);
+    CHECK(qAlpha(v.pixel(100, 60)) > 100);    // 세로로 펴졌다
+    CHECK(qAlpha(v.pixel(125, 60)) < 60);
+    d->undoStack()->undo();
+    // 소실점 방향으로 펴기
+    g.ruler = 0;
+    g.perspective = true;
+    g.snapToVanish = true;
+    g.vanishCount = 1;
+    c->setGuides(g);
+    const QPointF vp = c->vanishPoint(0);
+    CHECK(vp.y() == 60);
+    QTest::mousePress(c, Qt::LeftButton, {}, imgToWidget(c, d, {100, 60}));
+    QTest::mouseMove(c, imgToWidget(c, d, {150, 70}));
+    QTest::mouseRelease(c, Qt::LeftButton, {}, imgToWidget(c, d, {150, 70}));
+    const QImage pv = d->keyImage(0, 0);
+    CHECK(qAlpha(pv.pixel(130, 60)) > 100);   // 소실점이 같은 높이라 가로로 펴진다
+    CHECK(qAlpha(pv.pixel(130, 70)) < 60);
+    d->undoStack()->undo();
+    c->setGuides(CanvasWidget::Guides());
 }
 
 static void testRecorder(MainWindow& w) {
@@ -1017,6 +2032,7 @@ int main(int argc, char** argv) {
     testShortcuts(w);
     testPuppet();
     testTimelineZoom();
+    testTiltAndCustomBrush(w);
     testCutDashBrush();
     testFxCategories(w);
     testImageMenu();
@@ -1043,7 +2059,23 @@ int main(int argc, char** argv) {
         }
         w.grab().save("/tmp/demo/10_clips.png");
     }
+    testFrameEditing();
+    testNestedFolders();
+    testSelectAndPick(w);
+    testGradientTextSymmetry(w);
+    testRulerGuides(w);
     testRecorder(w);
+    testPaletteAndKeyProfile(w);
+    testCollab();
+    testPlugins(w);
+    testCompositeRegion();
+    testInbetween();
+    testVectorLayer(w);
+    testScriptEngine(w);
+    testLibraryAndPanel();
+    testDemo5Basics(w);
+    testPsdRoundTrip();
+    testVideoImport(w);
     testRenderPrintPublish(w);
     testCanvas(w);
 

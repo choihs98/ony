@@ -12,7 +12,23 @@ struct BrushParams {
     int hardness = 85;   // 0~100 (0 = 에어브러시처럼 부드러움)
     bool pressure = false;
     int preset = 0;      // brushPreset() 인덱스
+    bool tilt = false;        // 펜 기울기를 쓰면 붓이 납작해지고 기운 쪽으로 돈다
+    int customBrush = -1;     // 사용자 브러시 번호 (-1 = 없음)
+    // 아래 둘은 설정이 아니라 그리는 동안 채워지는 값 (태블릿 기울기)
+    double tiltAngle = 0;     // 도
+    double tiltAmount = 0;    // 0~1
 };
+
+// 사용자 브러시: 그림 한 장을 도장처럼 쓴다 (알파만 쓰고 색은 현재 색으로 칠한다)
+int customBrushCount();
+QString customBrushName(int i);
+QImage customBrushImage(int i);
+int addCustomBrush(const QString& name, const QImage& img);   // 번호를 돌려준다
+void removeCustomBrush(int i);
+void clearCustomBrushes();
+// 사용자 질감: 비어 있으면 기본 질감을 쓴다
+void setCustomGrainTexture(const QImage& tile);
+QImage customGrainTexture();
 
 enum class BrushShape { Round, Square, Star, Spray };
 
@@ -41,6 +57,8 @@ struct BrushDabCache {
     QImage img;
     int preset = -1, d = -1, hardness = -1;
     QRgb color = 0;
+    int custom = -1;
+    int tiltKey = 0;
     double dir = 0;  // 마지막 획 방향(도)
 };
 

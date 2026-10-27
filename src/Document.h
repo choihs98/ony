@@ -1,5 +1,6 @@
 #pragma once
 #include <QColor>
+#include <QHash>
 #include <QMap>
 #include <QSet>
 #include <QVariantMap>
@@ -25,6 +26,19 @@ struct CameraKey {
     qreal rotation = 0;       // 도
     // 이 키에서 다음 키까지의 속도 곡선: 0 직선, 1 느리게 시작, 2 느리게 끝, 3 느리게 시작·끝, 4 계단(다음 키에서 한 번에 이동)
     int ease = 0;
+};
+
+// 벡터 레이어의 획 하나 (점을 나중에 다시 옮기거나 굵기·색을 바꿀 수 있다)
+struct VecStroke {
+    QVector<QPointF> pts;
+    QVector<float> pressure;
+    QColor color{Qt::black};
+    double width = 6;
+    bool eraser = false;
+    bool closed = false;
+    bool filled = false;
+    QColor fill{Qt::transparent};
+    bool visible = true;
 };
 
 struct Layer {
@@ -55,12 +69,25 @@ struct Layer {
     int puppetParent = 0;             // 부모 퍼펫 레이어의 puppetId (0 = 없음)
     qreal pivotX = -1, pivotY = -1;   // 회전·크기 기준점 (그림 좌표, 음수 = 가운데)
     QMap<int, CameraKey> pkeys; // 프레임 -> 변환 키
+    // ---- 벡터 레이어 ----
+    bool vector = false;                          // 켜면 이 레이어의 그림은 벡터 획으로 보관된다
+    QMap<int, QVector<VecStroke>> vstrokes;       // 키 프레임 -> 획 목록
 };
 
 struct Folder {
     QString name;
     bool visible = true;
     qreal opacity = 1.0;
+    int parent = -1;          // 상위 폴더 인덱스 (-1 = 최상위). 폴더 중첩.
+};
+
+// 타임라인 프레임 클립보드
+struct FrameClip {
+    QSize size;
+    int count = 0;                   // 프레임 수
+    QVector<QVector<QImage>> data;   // [레이어][프레임] — null 이면 홀드(직전 이미지 유지)
+    QStringList layerNames;          // 참고용 (여러 레이어를 복사했을 때)
+    bool isEmpty() const { return count <= 0 || data.isEmpty(); }
 };
 
 // 드로잉 레코더가 기록한 획 하나
@@ -120,6 +147,19 @@ public:
     int addFolder(const QString& name);
     void removeFolder(int i);
     void setLayerFolder(int layer, int folder);
+    void setFolderParent(int folder, int parent);      // 폴더 중첩 (순환은 거절)
+    int folderDepth(int folder) const;                 // 최상위 = 0
+    bool folderVisibleEffective(int folder) const;     // 상위 폴더까지 따져 본 표시 여부
+    qreal folderOpacityEffective(int folder) const;    // 상위 폴더까지 곱한 불투명도
+    QString folderPath(int folder) const;              // "상위 / 하위" 형태
+
+    // ---- 타임라인 프레임 편집 ----
+    FrameClip copyFrames(int layer, int a, int b, bool allLayers) const;
+    // insert = true 면 끼워 넣고(뒤를 민다), false 면 덮어쓴다. 성공하면 true.
+    bool pasteFrames(int layer, int at, const FrameClip& c, bool insert);
+    // shift = true 면 뒤 프레임을 당겨 길이를 줄이고, false 면 그 자리를 비운다.
+    bool deleteFrames(int layer, int a, int b, bool allLayers, bool shift);
+    bool moveFrames(int layer, int a, int b, int dest, bool allLayers);
 
     // ---- 키 이미지 ----
     int keyIndexAt(int layer, int frame) const;
@@ -138,6 +178,9 @@ public:
 
     // ---- 합성 ----
     QImage composite(int frame, bool paper = true, bool useCamera = false) const;
+    // 이미 만들어 둔 합성 그림의 일부만 다시 그린다 (획을 그리는 동안 쓰면 훨씬 빠르다).
+    // 블렌딩 모드나 카메라·프록시가 걸려 있으면 false 를 돌려주니, 그때는 composite() 를 쓰면 된다.
+    bool compositeRegion(QImage& target, const QRect& region, int frame, bool paper) const;
     // 내보내기용: 배경색(alpha 0 = 투명)과 카메라 적용 여부를 지정해 원본 해상도로 합성한다
     QImage renderFrame(int frame, const QColor& background, bool useCamera) const;
 
@@ -178,6 +221,27 @@ public:
     // 기록된 획을 새 레이어의 프레임들로 풀어 쓴다 (획이 그려지는 과정이 애니메이션이 된다). 만든 레이어 번호를 돌려준다 (-1 = 실패).
     int strokesToFrames(int srcFrame, int startFrame, int nFrames, bool byTime);
 
+    // ---- 벡터 레이어 ----
+    void setVectorLayer(int layer, bool on);
+    bool isVectorLayer(int layer) const { return layer >= 0 && layer < layers_.size() && layers_[layer].vector; }
+    const QVector<VecStroke>* vectorStrokes(int layer, int frame) const;
+    void setVectorStrokes(int layer, int frame, const QVector<VecStroke>& s);  // 넣고 그림을 다시 그린다
+    void addVectorStroke(int layer, int frame, const VecStroke& s);
+    QImage renderVectorFrame(int layer, int frame) const;      // 획들을 그려 낸 그림
+    void rebuildVectorFrame(int layer, int frame);             // 그려서 frames[frame] 에 넣는다
+    int vectorStrokeCount(int layer, int frame) const;
+    // 벡터 획을 래스터(보통 그림)로 굳힌다. 벡터 데이터는 지운다.
+    void flattenVectorLayer(int layer);
+    // 두 벡터 프레임 사이를 t(0~1) 로 섞은 획 목록
+    static QVector<VecStroke> interpolateStrokes(const QVector<VecStroke>& a, const QVector<VecStroke>& b, double t);
+
+    // ---- 자동 중간 그림 (인비트위닝) ----
+    // a, b 는 프레임 번호. 그 사이를 채운다. mode: 0 자동(벡터면 벡터), 1 모양 섞기(모프), 2 겹쳐 지나가기(크로스페이드)
+    // ease: 0 직선, 1 느리게 시작, 2 느리게 끝, 3 느리게 시작·끝
+    // 만든 중간 그림 개수를 돌려준다 (0 = 실패)
+    int makeInbetweens(int layer, int a, int b, int mode, int ease);
+    static double easeValue(double t, int ease);
+
     // ---- 퍼펫 레이어 ----
     void setPuppet(int layer, bool on);
     CameraKey puppetAt(int layer, int frame) const;          // 키가 없으면 단위 변환
@@ -216,6 +280,10 @@ public:
     QImage libraryImage(int i) const { return libImages_.value(i); }
     int addToLibrary(const QString& name, const QImage& img);
     void removeFromLibrary(int i);
+    QString libraryCategory(int i) const { return libCats_.value(i); }
+    void setLibraryCategory(int i, const QString& cat);
+    void setLibraryName(int i, const QString& name);
+    QStringList libraryCategories() const;      // 쓰이고 있는 분류 목록 (가나다순, 중복 없음)
 
     // ---- 사운드 ----
     struct AudioTrack {
@@ -286,7 +354,7 @@ private:
     void resetLayersTo(const QString& firstName);
     QVariantMap extraSave() const;
     void extraLoad(const QVariantMap& m);
-    void drawLayers(QImage& target, const QTransform& xf, int frame) const;
+    void drawLayers(QImage& target, const QTransform& xf, int frame, const QRect& clip = QRect()) const;
 
     QSize size_{1280, 720};
     int fps_ = 24;
@@ -298,6 +366,7 @@ private:
     bool cameraEnabled_ = false;
     QMap<int, CameraKey> cameraKeys_;
     QStringList libNames_;
+    QStringList libCats_;
     QVector<QImage> libImages_;
     QVector<AudioTrack> audioTracks_;
     double masterVolume_ = 1.0;
@@ -309,6 +378,14 @@ private:
     QVector<MarkColor> markColors_{{QStringLiteral("빨강"), QColor(0xe5, 0x39, 0x35)}};
     bool soloCurrent_ = false;
     QUndoStack* undo_;
+    // 효과(FX) 결과 캐시: 같은 그림에 같은 효과면 다시 계산하지 않는다
+    struct FxCacheEntry {
+        qint64 srcKey = 0;
+        QString sig;
+        QImage out;
+    };
+    mutable QHash<quint64, FxCacheEntry> fxCache_;
+    QImage fxApplied(int layer, int key, const QImage& src) const;
     int nextPuppetId_ = 1;
     bool recording_ = false;
     RenderCamera renderCam_;

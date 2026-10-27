@@ -1,6 +1,7 @@
 #pragma once
 #include <QHash>
 #include <QPixmap>
+#include <QVector>
 #include <QWidget>
 
 class Document;
@@ -71,4 +72,22 @@ private:
     int frameAt(int x) const;
     Document* doc_;
     int rangeA_ = -1, rangeB_ = -1;
+};
+
+// 소리 파형 막대: 프로젝트 길이에 맞춰 소리의 크기를 그린다
+class WaveformBar : public QWidget {
+    Q_OBJECT
+public:
+    explicit WaveformBar(Document* doc, QWidget* parent = nullptr);
+    void setPeaks(const QVector<float>& peaks, const QString& label);
+    void clearPeaks();
+    bool hasPeaks() const { return !peaks_.isEmpty(); }
+    QSize sizeHint() const override { return QSize(200, 34); }
+protected:
+    void paintEvent(QPaintEvent*) override;
+    void mousePressEvent(QMouseEvent*) override;
+private:
+    Document* doc_;
+    QVector<float> peaks_;
+    QString label_;
 };

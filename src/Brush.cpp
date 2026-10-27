@@ -1,7 +1,9 @@
 #include "Brush.h"
 
 #include <QPainter>
+#include <QPair>
 #include <QPolygonF>
+#include <QVector>
 #include <QRadialGradient>
 #include <QTransform>
 #include <algorithm>
@@ -41,9 +43,43 @@ const BrushPreset kPresets[] = {
 };
 constexpr int kCount = sizeof(kPresets) / sizeof(kPresets[0]);
 
-QImage makeDab(const BrushPreset& pr, int d, int hardness, const QColor& c) {
+QVector<QPair<QString, QImage>> g_custom;
+QImage g_customGrain;
+
+QImage makeDab(const BrushPreset& pr, int d, int hardness, const QColor& c, int custom, double tiltAngle, double tiltAmount) {
     d = std::max(1, d);
-    const double asp = std::clamp(pr.aspect, 5, 100) / 100.0;
+    if (custom >= 0 && custom < g_custom.size() && !g_custom[custom].second.isNull()) {
+        // 사용자 브러시: 그림의 알파를 모양으로 쓰고 현재 색으로 칠한다
+        const QImage src = g_custom[custom].second;
+        const int side = int(std::ceil(d * 1.5)) + 4;
+        QImage img(side, side, QImage::Format_ARGB32_Premultiplied);
+        img.fill(Qt::transparent);
+        const QSize fit = src.size().scaled(QSize(d, d), Qt::KeepAspectRatio);
+        QImage tinted(fit.isEmpty() ? QSize(1, 1) : fit, QImage::Format_ARGB32_Premultiplied);
+        tinted.fill(Qt::transparent);
+        {
+            QPainter tp(&tinted);
+            tp.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            tp.drawImage(QRect(QPoint(0, 0), tinted.size()), src);
+            tp.setCompositionMode(QPainter::CompositionMode_SourceIn);
+            tp.fillRect(tinted.rect(), c);
+        }
+        QPainter p(&img);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        p.translate(side / 2.0, side / 2.0);
+        if (tiltAmount > 0.01) {
+            p.rotate(tiltAngle);
+            p.scale(1.0, std::max(0.15, 1.0 - 0.8 * tiltAmount));
+        }
+        p.drawImage(QPointF(-tinted.width() / 2.0, -tinted.height() / 2.0), tinted);
+        return img;
+    }
+    double asp = std::clamp(pr.aspect, 5, 100) / 100.0;
+    double angle = pr.angle;
+    if (tiltAmount > 0.01) {   // 펜을 기울이면 납작해지고 기운 쪽으로 돈다
+        asp *= std::max(0.15, 1.0 - 0.8 * tiltAmount);
+        angle = tiltAngle;
+    }
     const int side = int(std::ceil(d * 1.5)) + 4; // 회전해도 잘리지 않게 여유
     QImage img(side, side, QImage::Format_ARGB32_Premultiplied);
     img.fill(Qt::transparent);
@@ -51,7 +87,7 @@ QImage makeDab(const BrushPreset& pr, int d, int hardness, const QColor& c) {
     p.setRenderHint(QPainter::Antialiasing, !pr.aliased);
     p.setPen(Qt::NoPen);
     p.translate(side / 2.0, side / 2.0);
-    p.rotate(pr.angle);
+    p.rotate(angle);
     if (pr.shape == BrushShape::Square) {
         p.setBrush(c);
         p.drawRect(QRectF(-d / 2.0, -d * asp / 2.0, d, d * asp));
@@ -84,14 +120,18 @@ QImage makeDab(const BrushPreset& pr, int d, int hardness, const QColor& c) {
     return img;
 }
 
-const QImage& dabFor(BrushDabCache& cache, int preset, int d, int hardness, const QColor& c) {
-    if (cache.preset == preset && cache.d == d && cache.hardness == hardness && cache.color == c.rgba() && !cache.img.isNull())
+const QImage& dabFor(BrushDabCache& cache, int preset, int d, int hardness, const QColor& c, int custom, double ta, double tm) {
+    const int tkey = int(tm * 20) * 400 + int(ta / 10);
+    if (cache.preset == preset && cache.d == d && cache.hardness == hardness && cache.color == c.rgba() &&
+        cache.custom == custom && cache.tiltKey == tkey && !cache.img.isNull())
         return cache.img;
     cache.preset = preset;
     cache.d = d;
     cache.hardness = hardness;
     cache.color = c.rgba();
-    cache.img = makeDab(kPresets[preset], d, hardness, c);
+    cache.custom = custom;
+    cache.tiltKey = tkey;
+    cache.img = makeDab(kPresets[preset], d, hardness, c, custom, ta, tm);
     return cache.img;
 }
 } // namespace
@@ -133,7 +173,9 @@ void brushStampAt(QImage& buf, const BrushParams& params, const QColor& color, c
         const double rr = sr * std::sqrt(rng.generateDouble());
         at += QPointF(std::cos(a) * rr, std::sin(a) * rr);
     }
-    const QImage& img = dabFor(cache, pi, int(std::ceil(r * 2.0)), pr.aliased ? 100 : params.hardness, pr.eraser ? QColor(Qt::black) : color);
+    const QImage& img = dabFor(cache, pi, int(std::ceil(r * 2.0)), pr.aliased ? 100 : params.hardness,
+                               pr.eraser ? QColor(Qt::black) : color, params.customBrush,
+                               params.tilt ? params.tiltAngle : 0.0, params.tilt ? params.tiltAmount : 0.0);
     p.setOpacity(sc);
     if (pr.follow) {
         p.translate(at);
@@ -162,6 +204,14 @@ void brushStampAlong(QImage& buf, const BrushParams& params, const QColor& color
 }
 
 void brushApplyGrain(QImage& buf, int grain, QPoint origin) {
+    if (!g_customGrain.isNull()) {   // 사용자 질감이 지정돼 있으면 그것을 쓴다
+        QPainter p(&buf);
+        p.setCompositionMode(QPainter::CompositionMode_DestinationIn);
+        QBrush gb(g_customGrain);
+        gb.setTransform(QTransform::fromTranslate(-origin.x(), -origin.y()));
+        p.fillRect(buf.rect(), gb);
+        return;
+    }
     if (grain <= 0) return;
     static QImage tile[101];
     const int g = std::clamp(grain, 1, 100);
@@ -218,3 +268,44 @@ QImage brushPreview(const BrushParams& params, const QColor& color, QSize size) 
     }
     return buf;
 }
+
+// ---------------- 사용자 브러시 · 질감 ----------------
+int customBrushCount() { return g_custom.size(); }
+QString customBrushName(int i) { return (i >= 0 && i < g_custom.size()) ? g_custom[i].first : QString(); }
+QImage customBrushImage(int i) { return (i >= 0 && i < g_custom.size()) ? g_custom[i].second : QImage(); }
+
+int addCustomBrush(const QString& name, const QImage& img) {
+    if (img.isNull()) return -1;
+    QImage src = img.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    if (src.width() > 512 || src.height() > 512) src = src.scaled(512, 512, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    g_custom.push_back({name.isEmpty() ? QStringLiteral("사용자 브러시") : name, src});
+    return g_custom.size() - 1;
+}
+
+void removeCustomBrush(int i) {
+    if (i >= 0 && i < g_custom.size()) g_custom.remove(i);
+}
+
+void clearCustomBrushes() { g_custom.clear(); }
+
+void setCustomGrainTexture(const QImage& tile) {
+    if (tile.isNull()) {
+        g_customGrain = QImage();
+        return;
+    }
+    // 알파만 쓴다: 밝은 곳은 남고 어두운 곳은 비는 질감
+    QImage t = tile.convertToFormat(QImage::Format_ARGB32);
+    QImage out(t.size(), QImage::Format_ARGB32_Premultiplied);
+    for (int y = 0; y < t.height(); ++y) {
+        const QRgb* s = reinterpret_cast<const QRgb*>(t.constScanLine(y));
+        QRgb* d = reinterpret_cast<QRgb*>(out.scanLine(y));
+        for (int x = 0; x < t.width(); ++x) {
+            const int lum = (qRed(s[x]) * 299 + qGreen(s[x]) * 587 + qBlue(s[x]) * 114) / 1000;
+            const int a = qAlpha(s[x]) < 255 ? qAlpha(s[x]) : lum;
+            d[x] = qRgba(0, 0, 0, a);
+        }
+    }
+    g_customGrain = out;
+}
+
+QImage customGrainTexture() { return g_customGrain; }

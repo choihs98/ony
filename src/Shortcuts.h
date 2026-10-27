@@ -33,6 +33,9 @@ public:
     QString set(const QString& id, const QKeySequence& ks);
     void reset(const QString& id);
     void resetAll();
+    // 단축키 프로필 파일 (.onykeys). 성공하면 빈 문자열, 실패하면 이유.
+    QString saveProfile(const QString& path) const;
+    QString loadProfile(const QString& path);
 
 signals:
     void changed();

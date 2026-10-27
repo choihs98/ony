@@ -2,6 +2,7 @@
 #include <QColor>
 #include <QImage>
 #include <QTimer>
+#include <QVector>
 #include <QWidget>
 
 #include "Brush.h"
@@ -76,6 +77,9 @@ public:
     QColor colorB() const { return b_; }
     void setColorA(const QColor& c);
     void swapColors();
+    QVector<QColor> swatches() const { return swatches_; }
+    void setSwatches(const QVector<QColor>& cols);
+    static QVector<QColor> defaultPalette();
 signals:
     void colorAChanged(const QColor&);
 private:
@@ -86,6 +90,9 @@ private:
     ColorWheel* wheel_;
     QLabel* rgb_;
     bool syncing_ = false;
+    QVector<QColor> swatches_;
+    class QGridLayout* swatchGrid_ = nullptr;
+    void rebuildSwatches();
 };
 
 // 도구 패널: 브러시 아이콘 + 크기/불투명도/경도/필압
@@ -98,9 +105,11 @@ public:
     void setRow(int row);
     void selectPreset(int row);
     void bumpSize(int delta); // 단축키 [ ] 용
+    void refreshCustomBrushes();
 signals:
     void brushSelected(int row);
     void paramsChanged(const BrushParams& p);
+    void smoothingStrengthChanged(int strength);
 private:
     QListWidget* list_;           // 숨겨진 모델 (선택 행 = 프리셋)
     QList<QToolButton*> icons_;
@@ -108,6 +117,11 @@ private:
     QSlider* opacity_;
     QSlider* hardness_;
     QCheckBox* pressure_;
+    QCheckBox* tilt_ = nullptr;
+    QSlider* smooth_ = nullptr;
+    QSpinBox* smoothV_ = nullptr;
+    class QLabel* smoothLabel_ = nullptr;
+    class QComboBox* customRow_ = nullptr;
     QSpinBox* sizeV_;
     QSpinBox* opacityV_;
     QSpinBox* hardnessV_;
@@ -182,6 +196,9 @@ private:
     void rebuild();
     Document* doc_;
     QListWidget* list_;
+    class QLineEdit* search_ = nullptr;
+    class QComboBox* cat_ = nullptr;
+    bool syncing_ = false;
 };
 
 class PlaceholderPanel : public QWidget {

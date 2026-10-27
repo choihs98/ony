@@ -374,3 +374,64 @@ void ScrubBar::mousePressEvent(QMouseEvent* e) {
 void ScrubBar::mouseMoveEvent(QMouseEvent* e) {
     if (e->buttons() & Qt::LeftButton) doc_->setCurrentFrame(frameAt(e->pos().x()));
 }
+
+
+// ---------------------------------------------------------------- WaveformBar
+WaveformBar::WaveformBar(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) {
+    setFixedHeight(34);
+    setToolTip(QStringLiteral("소리 파형 — 클릭하면 그 위치로 재생 헤드가 갑니다"));
+    connect(doc_, &Document::currentChanged, this, [this] { update(); });
+    connect(doc_, &Document::structureChanged, this, [this] { update(); });
+}
+
+void WaveformBar::setPeaks(const QVector<float>& peaks, const QString& label) {
+    peaks_ = peaks;
+    label_ = label;
+    update();
+}
+
+void WaveformBar::clearPeaks() {
+    peaks_.clear();
+    label_.clear();
+    update();
+}
+
+void WaveformBar::paintEvent(QPaintEvent*) {
+    QPainter p(this);
+    const QPalette pal = palette();
+    const bool dark = pal.color(QPalette::Window).lightness() < 128;
+    p.fillRect(rect(), dark ? pal.color(QPalette::Window).darker(130) : pal.color(QPalette::Window).darker(108));
+    const QColor accent = pal.color(QPalette::Highlight);
+    if (peaks_.isEmpty()) {
+        p.setPen(pal.color(QPalette::WindowText).darker(140));
+        p.drawText(rect().adjusted(6, 0, -6, 0), Qt::AlignVCenter | Qt::AlignLeft,
+                   QStringLiteral("소리 파형: 소리 파일을 불러오면 여기에 보입니다"));
+        return;
+    }
+    const int w = width(), h = height();
+    const int mid = h / 2;
+    p.setPen(QPen(QColor(0x5c, 0xc8, 0xa8), 1));
+    for (int x = 0; x < w; ++x) {
+        const int i = int(qint64(x) * peaks_.size() / std::max(1, w));
+        const float v = peaks_.value(std::clamp(i, 0, int(peaks_.size()) - 1));
+        const int a = std::max(1, int(v * (h - 6) / 2));
+        p.drawLine(x, mid - a, x, mid + a);
+    }
+    // 재생 헤드
+    const int n = std::max(1, doc_->frameCount());
+    const int px = int(qint64(doc_->currentFrame()) * w / n);
+    p.setPen(QPen(accent, 2));
+    p.drawLine(px, 0, px, h);
+    if (!label_.isEmpty()) {
+        p.setPen(pal.color(QPalette::WindowText).darker(130));
+        QFont f = font();
+        f.setPointSizeF(std::max(7.0, font().pointSizeF() - 1.5));
+        p.setFont(f);
+        p.drawText(rect().adjusted(6, 1, -6, 0), Qt::AlignTop | Qt::AlignLeft, label_);
+    }
+}
+
+void WaveformBar::mousePressEvent(QMouseEvent* e) {
+    const int n = std::max(1, doc_->frameCount());
+    doc_->setCurrentFrame(std::clamp(int(qint64(e->pos().x()) * n / std::max(1, width())), 0, n - 1));
+}

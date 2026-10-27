@@ -1,4 +1,7 @@
 #include <QApplication>
+#include <QGuiApplication>
+#include <QScreen>
+#include <algorithm>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QIcon>
@@ -81,18 +84,32 @@ int main(int argc, char** argv) {
     app.setStyle(Style::createStyle());
     Style::installMotion();
     MainWindow w;
-    w.resize(1600, 900);
+    // 처음 켤 때는 화면에 꽉 차게 띄운다 (사용자가 크기를 바꾼 적이 있으면 그 크기를 따른다)
+    {
+        QSettings st("Ony", "Ony");
+        const QByteArray geo = st.value("window/geometry").toByteArray();
+        if (!geo.isEmpty() && st.value("window/remember", true).toBool()) {
+            w.restoreGeometry(geo);
+        } else {
+            const QRect avail = QGuiApplication::primaryScreen()
+                                    ? QGuiApplication::primaryScreen()->availableGeometry()
+                                    : QRect(0, 0, 1600, 900);
+            w.setGeometry(avail);
+            w.setWindowState(w.windowState() | Qt::WindowMaximized);
+        }
+    }
 
     if (splash) {
-        // 로고가 너무 빨리 사라지지 않게 최소 시간을 보장한 뒤, 로고가 사라지면서 화면이 켜진다
-        const int left = 1100 - int(clock.elapsed());
+        // 로고를 충분히 보여 준 뒤, 로고가 천천히 사라지면서 창이 켜진다
+        const int left = 1500 - int(clock.elapsed());
         if (left > 0) pump(left);
         w.setWindowOpacity(0.0);
         w.show();
         QApplication::processEvents();
-        animate(380, [&](double t) {
-            splash->setWindowOpacity(1.0 - t);
-            w.setWindowOpacity(t);
+        // 로고가 먼저 거의 다 사라지고, 그 뒤에 창이 또렷해진다
+        animate(900, [&](double t) {
+            splash->setWindowOpacity(std::clamp(1.0 - t * 1.45, 0.0, 1.0));
+            w.setWindowOpacity(std::clamp((t - 0.35) / 0.65, 0.0, 1.0));
         });
         w.setWindowOpacity(1.0);
         splash->finish(&w);

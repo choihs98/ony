@@ -171,6 +171,49 @@ Glyph makeGlyph(const QString& n) {
         s.addEllipse(QPointF(12, 9), 4.5, 4.5);
         line(s, 12, 13.5, 12, 21);
         f.addEllipse(QPointF(12, 9), 1.8, 1.8);
+    } else if (n == "pick") { // 스포이트
+        s.moveTo(4, 20);
+        s.lineTo(4, 17);
+        s.lineTo(14, 7);
+        s.lineTo(17, 10);
+        s.lineTo(7, 20);
+        s.closeSubpath();
+        f.addEllipse(QPointF(18, 6), 3.2, 3.2);
+    } else if (n == "lasso") {
+        s.moveTo(5, 13);
+        s.cubicTo(5, 5, 19, 5, 19, 12);
+        s.cubicTo(19, 17, 12, 19, 10, 17);
+        line(s, 10, 17, 9, 21);
+    } else if (n == "polygon") {
+        s.moveTo(5, 9);
+        s.lineTo(13, 4);
+        s.lineTo(20, 11);
+        s.lineTo(16, 20);
+        s.lineTo(6, 18);
+        s.closeSubpath();
+        for (const QPointF& p : {QPointF(5, 9), QPointF(13, 4), QPointF(20, 11), QPointF(16, 20), QPointF(6, 18)})
+            f.addEllipse(p, 1.5, 1.5);
+    } else if (n == "wand") {
+        line(s, 4, 20, 15, 9);
+        f.addRect(14, 5, 5.5, 5.5);
+        for (const QPointF& p : {QPointF(6, 6), QPointF(20, 17)}) {
+            f.addRect(p.x() - 0.7, p.y() - 2.4, 1.4, 4.8);
+            f.addRect(p.x() - 2.4, p.y() - 0.7, 4.8, 1.4);
+        }
+    } else if (n == "gradient") {
+        s.addRect(4, 5, 16, 14);
+        for (int i = 0; i < 6; ++i) f.addRect(5.0, 6.0 + i * 2.2, 14.0, 2.2 - i * 0.3);
+    } else if (n == "text") {
+        line(s, 5, 6, 19, 6);
+        line(s, 12, 6, 12, 20);
+    } else if (n == "symmetry") {
+        line(s, 12, 3, 12, 21);
+        s.moveTo(9, 7);
+        s.lineTo(4, 12);
+        s.lineTo(9, 17);
+        s.moveTo(15, 7);
+        s.lineTo(20, 12);
+        s.lineTo(15, 17);
     } else if (n == "crop") {
         line(s, 7, 3, 7, 17);
         line(s, 7, 17, 21, 17);

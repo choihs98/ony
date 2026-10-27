@@ -3,6 +3,7 @@
 #include <QImage>
 #include <QList>
 #include <QMainWindow>
+#include <optional>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QVector>
@@ -11,6 +12,7 @@
 #include "Brush.h"
 #include "CanvasWidget.h"
 #include "Extras.h"
+#include "Plugins.h"
 #include "MorePanels.h"
 
 class Document;
@@ -46,6 +48,10 @@ public:
     };
     QStringList publishTo(const QString& folder, const QString& name, const PublishOptions& po);
     bool runTransition(int layer, int f0, int n, int kind);
+    class ColorPanel* colorPanel() const { return color_; }
+    std::optional<QString> scriptHostCommand(const QStringList& tokens);
+    bool savePalette(const QString& path) const;
+    int loadPalette(const QString& path);
     bool lightTableOn() const { return lightAct_ && lightAct_->isChecked(); }
     CanvasWidget* canvas() const { return canvas_; }
     void applyTheme(int index);
@@ -84,6 +90,7 @@ private:
     void perspectiveDialog();
     void folderAction(int kind);
     void loadAudio();
+    void updateWaveform();
     void syncAudio();
 
     void togglePlay();
@@ -100,6 +107,20 @@ private:
     void publishDialog();
     void printDialog();
     void renderCameraDialog();
+    void vectorEditDialog(int kind);
+    void inbetweenDialog();
+    void checkCollabOnOpen(const QString& path);
+    void collabDialog();
+    void releaseCollabLock();
+    void rebuildPluginMenu();
+    void pluginManagerDialog();
+    void runPluginCommand(const Plugins::Command& c);
+    void symmetryDialog();
+    void colorAdjustDialog(bool levelsMode);
+    void undoHistoryDialog();
+    void ffmpegDialog();
+    void frameEdit(int kind);
+    void gradientTextDialog();
     void strokeAnimationDialog();
     void transitionDialog(int kind, const QString& name);
     void applyEffect(const QString& text, const std::function<QImage(const QImage&)>& fn);
@@ -110,6 +131,9 @@ private:
     void scanImportDialog();
     void exportXdtsDialog();
     void importSequenceDialog();
+    void importVideoDialog();
+    void importPsdDialog();
+    void exportPsdDialog();
     void newClip();
     void openPath(const QString& path);
     void setupAutosave();
@@ -118,6 +142,8 @@ private:
     QString templateDir() const;
     void switchClip(int idx);
     void renameClip();
+    void duplicateClip();
+    void mergeClip();
     void deleteClip();
     void rebuildClipMenu();
     void rebuildCustomMenu();
@@ -149,6 +175,10 @@ private:
     QLabel* canvasInfo_ = nullptr;
     QLabel* zoomLabel_ = nullptr;
     class ScrubBar* scrub_ = nullptr;
+    class WaveformBar* wave_ = nullptr;
+    QString waveSource_;
+    bool waveVisible_ = true;
+    bool exportBusy_ = false;
     QSlider* layerOpacity_ = nullptr;
     class QTabBar* clipTabs_ = nullptr;
     void syncClipTabs();
@@ -160,6 +190,9 @@ private:
     class QComboBox* speedBox_ = nullptr;
     int playDir_ = 1;
     QAction* recAct_ = nullptr;
+    QAction* symAct_ = nullptr;
+    FrameClip frameClip_;
+    bool frameAllLayers_ = false;
     QStringList lastPublishErrors_;
     class QTimer* autosaveTimer_ = nullptr;
     int brushRow_ = 0;
@@ -187,6 +220,12 @@ private:
     QTemporaryDir clipDir_;
     QMenu* clipMenu_ = nullptr;
     QMenu* customMenu_ = nullptr;
+    QMenu* pluginMenu_ = nullptr;
+    bool collabOn_ = false;
+    bool collabReadOnly_ = false;
+    QString collabNote_;
+    class QTimer* collabTimer_ = nullptr;
+    QVector<Plugins::Plugin> plugins_;
     QVector<CustomPanelDef> customDefs_;
     QList<QDockWidget*> customDocks_;
     QDockWidget* dockScript_ = nullptr;

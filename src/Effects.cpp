@@ -361,6 +361,125 @@ QImage echo(const QImage& in, int dist) {
     return o;
 }
 
+// 알파 모양의 부호 있는 거리장 (안쪽은 음수, 바깥쪽은 양수, 단위는 픽셀)
+static QVector<float> signedDistance(const QImage& src) {
+    const QImage s = src.convertToFormat(QImage::Format_ARGB32);
+    const int w = s.width(), h = s.height();
+    const float big = float(w + h);
+    QVector<float> din(w * h, big), dout(w * h, big);
+    for (int y = 0; y < h; ++y) {
+        const QRgb* r = reinterpret_cast<const QRgb*>(s.constScanLine(y));
+        for (int x = 0; x < w; ++x) (qAlpha(r[x]) >= 128 ? din : dout)[y * w + x] = 0.0f;
+    }
+    // 체임퍼 거리: 두 번 훑는다
+    auto chamfer = [&](QVector<float>& d) {
+        const float a = 1.0f, b = 1.4142f;
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                float v = d[y * w + x];
+                if (x > 0) v = std::min(v, d[y * w + x - 1] + a);
+                if (y > 0) v = std::min(v, d[(y - 1) * w + x] + a);
+                if (x > 0 && y > 0) v = std::min(v, d[(y - 1) * w + x - 1] + b);
+                if (x + 1 < w && y > 0) v = std::min(v, d[(y - 1) * w + x + 1] + b);
+                d[y * w + x] = v;
+            }
+        for (int y = h - 1; y >= 0; --y)
+            for (int x = w - 1; x >= 0; --x) {
+                float v = d[y * w + x];
+                if (x + 1 < w) v = std::min(v, d[y * w + x + 1] + a);
+                if (y + 1 < h) v = std::min(v, d[(y + 1) * w + x] + a);
+                if (x + 1 < w && y + 1 < h) v = std::min(v, d[(y + 1) * w + x + 1] + b);
+                if (x > 0 && y + 1 < h) v = std::min(v, d[(y + 1) * w + x - 1] + b);
+                d[y * w + x] = v;
+            }
+    };
+    chamfer(din);
+    chamfer(dout);
+    QVector<float> sd(w * h);
+    for (int i = 0; i < w * h; ++i) sd[i] = din[i] - dout[i];   // 안쪽 음수, 바깥쪽 양수
+    return sd;
+}
+
+// 알파의 무게중심 (그림이 비어 있으면 가운데)
+static QPointF alphaCentroid(const QImage& s) {
+    double sx = 0, sy = 0, sw = 0;
+    for (int y = 0; y < s.height(); ++y) {
+        const QRgb* r = reinterpret_cast<const QRgb*>(s.constScanLine(y));
+        for (int x = 0; x < s.width(); ++x) {
+            const double a = qAlpha(r[x]) / 255.0;
+            if (a <= 0.01) continue;
+            sx += x * a;
+            sy += y * a;
+            sw += a;
+        }
+    }
+    if (sw < 1e-6) return QPointF(s.width() / 2.0, s.height() / 2.0);
+    return QPointF(sx / sw, sy / sw);
+}
+
+static QImage shiftImage(const QImage& s, const QPointF& d) {
+    QImage out(s.size(), QImage::Format_ARGB32);
+    out.fill(Qt::transparent);
+    QPainter p(&out);
+    p.drawImage(d, s);
+    p.end();
+    return out;
+}
+
+QImage morph(const QImage& a, const QImage& b, double t) {
+    if (a.size() != b.size()) return crossfade(a, b, t);
+    t = std::clamp(t, 0.0, 1.0);
+    QImage A = a.convertToFormat(QImage::Format_ARGB32);
+    QImage B = b.convertToFormat(QImage::Format_ARGB32);
+    const int w = A.width(), h = A.height();
+    // 두 그림이 떨어져 있으면 거리장만으로는 이어지지 않는다.
+    // 무게중심을 가운데로 모아 모양만 섞은 뒤, 결과를 중간 위치로 옮긴다.
+    const QPointF ca = alphaCentroid(A), cb = alphaCentroid(B);
+    const QPointF center(w / 2.0, h / 2.0);
+    const QImage As = shiftImage(A, center - ca);
+    const QImage Bs = shiftImage(B, center - cb);
+    const QVector<float> da = signedDistance(As), db = signedDistance(Bs);
+    // 가는 선은 중간에서 끊기기 쉽다. 두 그림의 선 굵기를 보고 중간 프레임만 살짝 두껍게 잡는다.
+    auto halfThickness = [](const QVector<float>& d) {
+        float deepest = 0;
+        for (float v : d) deepest = std::min(deepest, v);
+        return -deepest;   // 안쪽으로 가장 깊은 거리 = 대략 선 굵기의 절반
+    };
+    const double thick = std::min(6.0, 0.75 * (halfThickness(da) + halfThickness(db)) / 2.0);
+    const double bias = thick * 4.0 * t * (1.0 - t);   // 양 끝에서는 0, 가운데에서 가장 큼
+    QImage mid(w, h, QImage::Format_ARGB32);
+    for (int y = 0; y < h; ++y) {
+        const QRgb* ra = reinterpret_cast<const QRgb*>(As.constScanLine(y));
+        const QRgb* rb = reinterpret_cast<const QRgb*>(Bs.constScanLine(y));
+        QRgb* d = reinterpret_cast<QRgb*>(mid.scanLine(y));
+        for (int x = 0; x < w; ++x) {
+            const int i = y * w + x;
+            const double sd = da[i] * (1 - t) + db[i] * t;
+            const double cover = std::clamp(0.5 - (sd - bias), 0.0, 1.0);
+            if (cover <= 0.001) {
+                d[x] = qRgba(0, 0, 0, 0);
+                continue;
+            }
+            const int aa = qAlpha(ra[x]), ab = qAlpha(rb[x]);
+            double wa = (1 - t) * (aa > 0 ? 1.0 : 0.15), wb = t * (ab > 0 ? 1.0 : 0.15);
+            const double sum = wa + wb;
+            if (sum < 1e-6) {
+                wa = 1 - t;
+                wb = t;
+            } else {
+                wa /= sum;
+                wb /= sum;
+            }
+            d[x] = qRgba(clamp255(int(qRed(ra[x]) * wa + qRed(rb[x]) * wb)),
+                         clamp255(int(qGreen(ra[x]) * wa + qGreen(rb[x]) * wb)),
+                         clamp255(int(qBlue(ra[x]) * wa + qBlue(rb[x]) * wb)),
+                         clamp255(int(std::round(cover * 255))));
+        }
+    }
+    const QPointF target = ca * (1 - t) + cb * t;
+    return shiftImage(mid, target - center).convertToFormat(QImage::Format_ARGB32_Premultiplied);
+}
+
 QImage crossfade(const QImage& a, const QImage& b, double t) {
     QImage o(a.size(), QImage::Format_ARGB32_Premultiplied);
     o.fill(Qt::transparent);
@@ -420,6 +539,8 @@ ParamInfo paramInfo(Type t) {
     case Type::Pixelate: return {true, 2, 64, 8, QStringLiteral("블록 크기")};
     case Type::Outline: return {true, 1, 20, 2, QStringLiteral("두께")};
     case Type::Sharpen: return {true, 10, 300, 100, QStringLiteral("세기")};
+    case Type::Curves: return {true, -100, 100, 40, QStringLiteral("S 곡선 세기")};
+    case Type::Levels: return {true, 0, 100, 30, QStringLiteral("대비 올리기")};
     default: return {};
     }
 }
@@ -433,6 +554,7 @@ QString categoryOf(Type t) {
     case Type::KeyWhite: case Type::KeyBlack: case Type::KeyGreen: return QStringLiteral("키잉");
     case Type::MotionBlurH: case Type::MotionBlurV: case Type::Echo: return QStringLiteral("모션");
     case Type::Noise: case Type::Vignette: case Type::DropShadow: return QStringLiteral("렌더링");
+    case Type::Curves: case Type::Levels: return QStringLiteral("색");
     default: return QStringLiteral("스타일화");
     }
 }
@@ -447,6 +569,31 @@ QVector<Type> typesIn(const QString& category) {
     for (int i = 0; i <= int(Type::Last); ++i)
         if (categoryOf(Type(i)) == category) v.push_back(Type(i));
     return v;
+}
+
+QImage curves(const QImage& in, const QVector<int>& lutR, const QVector<int>& lutG, const QVector<int>& lutB) {
+    if (lutR.size() != 256 || lutG.size() != 256 || lutB.size() != 256) return in;
+    return mapStraight(in, [&](QRgb c) {
+        return qRgba(clamp255(lutR[qRed(c)]), clamp255(lutG[qGreen(c)]), clamp255(lutB[qBlue(c)]), qAlpha(c));
+    });
+}
+
+QImage levels(const QImage& in, int inLow, int inHigh, double gamma, int outLow, int outHigh) {
+    inLow = std::clamp(inLow, 0, 254);
+    inHigh = std::clamp(inHigh, inLow + 1, 255);
+    outLow = std::clamp(outLow, 0, 255);
+    outHigh = std::clamp(outHigh, 0, 255);
+    gamma = std::clamp(gamma, 0.05, 10.0);
+    QVector<int> lut(256);
+    for (int i = 0; i < 256; ++i) {
+        double v = (double(i) - inLow) / double(inHigh - inLow);
+        v = std::clamp(v, 0.0, 1.0);
+        v = std::pow(v, 1.0 / gamma);
+        lut[i] = clamp255(int(std::round(outLow + v * (outHigh - outLow))));
+    }
+    return mapStraight(in, [&](QRgb c) {
+        return qRgba(lut[qRed(c)], lut[qGreen(c)], lut[qBlue(c)], qAlpha(c));
+    });
 }
 
 QImage flipH(const QImage& in) { return in.mirrored(true, false); }
@@ -482,6 +629,20 @@ QImage apply(const QImage& in, const Item& item) {
     case Type::Edge: return edge(in, 0);
     case Type::Outline: return outline(in, item.param);
     case Type::Sharpen: return sharpen(in, item.param);
+    case Type::Curves: {   // FX 스택에서는 세기 하나로 S 커브를 준다 (-100 ~ 100)
+        const double k = std::clamp(item.param, -100, 100) / 100.0;
+        QVector<int> lut(256);
+        for (int i = 0; i < 256; ++i) {
+            const double x = i / 255.0;
+            const double s = x + k * (x * (1 - x) * (x - 0.5) * 4.0);
+            lut[i] = clamp255(int(std::round(std::clamp(s, 0.0, 1.0) * 255)));
+        }
+        return curves(in, lut, lut, lut);
+    }
+    case Type::Levels: {   // 세기 = 대비를 올리는 정도
+        const int d = std::clamp(item.param, 0, 100) * 60 / 100;
+        return levels(in, d, 255 - d, 1.0, 0, 255);
+    }
     }
     return in;
 }
@@ -516,6 +677,8 @@ QString typeName(Type t) {
     case Type::Edge: return QStringLiteral("윤곽 검출");
     case Type::Outline: return QStringLiteral("외곽선");
     case Type::Sharpen: return QStringLiteral("선명하게");
+    case Type::Curves: return QStringLiteral("커브 (S 곡선)");
+    case Type::Levels: return QStringLiteral("레벨 (대비)");
     }
     return QString();
 }

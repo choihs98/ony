@@ -1,13 +1,16 @@
 #pragma once
 #include <QColor>
 #include <QElapsedTimer>
+#include <QHash>
 #include <QImage>
 #include <QPainterPath>
 #include <QPointF>
 #include <QRect>
+#include <QTransform>
 #include <QVector>
 #include <QWidget>
 #include <functional>
+#include <algorithm>
 
 #include "Brush.h"
 #include "Document.h"
@@ -18,7 +21,8 @@ class Document;
 class CanvasWidget : public QWidget {
     Q_OBJECT
 public:
-    enum class Tool { Pen, Pencil, Eraser, Line, Rect, Circle, Spline, Bucket, Select, Pan, Warp };
+    enum class Tool { Pen, Pencil, Eraser, Line, Rect, Circle, Spline, Bucket, Select, Pan, Warp,
+                      Pick, Lasso, Polygon, Wand, Gradient, Text };
 
     explicit CanvasWidget(Document* doc, QWidget* parent = nullptr);
 
@@ -26,9 +30,13 @@ public:
     Tool tool() const { return tool_; }
     void setColorA(const QColor& c) { colorA_ = c; }
     QColor colorA() const { return colorA_; }
-    void setBrush(const BrushParams& b) { brush_ = b; }
+    void setBrush(const BrushParams& b) { brush_ = b; brush_.tiltAngle = tiltAngle_; brush_.tiltAmount = tiltAmount_; }
+    void setPenTilt(double angleDeg, double amount);   // 테스트·보정용으로 기울기를 직접 지정
     BrushParams brush() const { return brush_; }
     void setSmoothing(bool on) { smoothing_ = on; }
+    void setSmoothingStrength(int s) { smoothStrength_ = std::clamp(s, 1, 99); }   // 1 = 약함, 99 = 아주 강함
+    int smoothingStrength() const { return smoothStrength_; }
+    bool smoothing() const { return smoothing_; }
     void setPaper(bool on) { paper_ = on; update(); }
     void setStencil(bool on) { stencil_ = on; }
     void setLightTable(bool on);
@@ -45,7 +53,15 @@ public:
         bool safe = false;
         int safePct = 90;
         bool thirds = false;
+        // 직선자: 켜면 획이 각도에 맞춰 곧게 펴진다 (0 끔, 1 수평·수직, 2 각도 지정, 3 원근 소실점)
+        int ruler = 0;
+        double rulerAngle = 0;          // 도
+        bool perspective = false;       // 소실점 가이드 그리기
+        int vanishCount = 1;            // 소실점 1~3개
+        double vp[3][2] = {{-1, -1}, {-1, -1}, {-1, -1}};   // 소실점 좌표 (음수 = 기본 위치)
+        bool snapToVanish = false;      // 획을 가장 가까운 소실점 방향으로 펴기
     };
+    QPointF vanishPoint(int i) const;
     void setGuides(const Guides& g) { guides_ = g; update(); }
     Guides guides() const { return guides_; }
 
@@ -62,7 +78,7 @@ public:
         bool blendToFront = false;       // 라이트 테이블 이미지를 현재 이미지 위에 표시
         bool allLayers = false;          // 보이는 모든 레이어에 적용
     };
-    void setLightTableParams(const LightTableParams& p) { ltParams_ = p; update(); }
+    void setLightTableParams(const LightTableParams& p) { ltParams_ = p; ltCache_.clear(); ltOverlay_ = QImage(); update(); }
     LightTableParams lightTableParams() const { return ltParams_; }
 
     // 내비게이터용
@@ -76,12 +92,60 @@ public:
     void selectAll();
     void clearSelection();
     QRect selection() const { return selValid_ ? selRect_ : QRect(); }
+    // 사각형이 아닌 선택(올가미·다각형·마술봉)일 때의 알파 마스크. 사각형 선택이면 null.
+    QImage selectionMask() const { return selValid_ ? selMask_ : QImage(); }
+    void setSelectionMask(const QImage& mask);          // 마스크로 선택 지정 (빈 이미지 = 해제)
+    void setSelectionRect(const QRect& r);              // 사각형 선택 지정
+    void invertSelection();
+    void growSelection(int px);      // 양수 = 키우기, 음수 = 줄이기
+    void featherSelection(int px);   // 가장자리 부드럽게
+    bool selectionFeathered() const { return selValid_ && selFeathered_; }
+    int wandTolerance() const { return wandTol_; }
+    void setWandTolerance(int t) { wandTol_ = std::clamp(t, 0, 255); }
+    bool wandSampleAllLayers() const { return wandAll_; }
+    void setWandSampleAllLayers(bool on) { wandAll_ = on; }
+
+    // 대칭 그리기
+    struct Symmetry {
+        bool on = false;
+        bool vertical = true;    // 세로축 기준 좌우 대칭
+        bool horizontal = false; // 가로축 기준 위아래 대칭
+        int radial = 1;          // 방사 대칭 횟수 (1 = 끔)
+        double axisX = -1, axisY = -1; // 음수 = 캔버스 가운데
+    };
+    void setSymmetry(const Symmetry& s) { sym_ = s; update(); }
+    Symmetry symmetry() const { return sym_; }
+
+    // 그라디언트
+    struct GradientParams {
+        int type = 0;      // 0 선형, 1 원형, 2 원뿔
+        bool toTransparent = false; // B 색 대신 투명으로
+        bool dither = false;
+    };
+    void setGradientParams(const GradientParams& g) { grad_ = g; }
+    GradientParams gradientParams() const { return grad_; }
+    void setColorB(const QColor& c) { colorB_ = c; }
+    QColor colorB() const { return colorB_; }
+
+    // 텍스트 도구
+    struct TextParams {
+        QString text = QStringLiteral("ONY");
+        QString family;
+        int size = 48;
+        bool bold = false, italic = false;
+        bool outline = false;
+        int outlineWidth = 2;
+    };
+    void setTextParams(const TextParams& t) { text_ = t; update(); }
+    TextParams textParams() const { return text_; }
     bool hasPendingWarp() const { return !pins_.isEmpty(); }
     void commitWarp();
     void cancelWarp();
 
 signals:
     void cursorMoved(int x, int y);
+    void colorPicked(const QColor& c);
+    void selectionChanged();
     void zoomChanged(qreal zoom);
     void message(const QString& text);
     void strokeFinished();
@@ -107,6 +171,9 @@ private:
     QElapsedTimer recClock_;
     QColor backdrop_{0x2d, 0x31, 0x36};
     QImage stencilMask_;
+    QHash<quint64, QImage> ltCache_;   // 라이트 테이블 색 입힌 그림 캐시
+    QImage ltOverlay_;                 // 겹쳐 둔 라이트 테이블 한 장
+    int ltOverlayFrame_ = -1;
     class QVariantAnimation* zoomAnim_ = nullptr;
     qreal zoomTarget_ = 1.0;
     QPointF zoomAnchorWidget_, zoomAnchorImage_;
@@ -137,6 +204,7 @@ private:
     QColor colorA_ = Qt::black;
     BrushParams brush_;
     bool smoothing_ = false;
+    int smoothStrength_ = 60;
     bool paper_ = false;
     bool stencil_ = false;
     bool lightTable_ = false;
@@ -157,6 +225,7 @@ private:
 
     QImage cache_;
     bool cacheDirty_ = true;
+    QRect partialDirty_;   // 획을 그리는 동안 바뀐 영역
 
     // 편집 상태
     int editLayer_ = -1;
@@ -184,6 +253,32 @@ private:
     // 선택/이동
     QRect selRect_;
     bool selValid_ = false;
+    QImage selMask_;             // 사각형이 아닌 선택의 알파 마스크 (캔버스 크기, null = 사각형)
+    bool selFeathered_ = false;   // 가장자리를 부드럽게 한 선택인지
+    QVector<QPointF> lassoPts_;  // 올가미·다각형이 그려지는 중의 점들
+    bool lassoing_ = false;
+    int wandTol_ = 32;
+    bool wandAll_ = false;
+    Symmetry sym_;
+    GradientParams grad_;
+    QColor colorB_{Qt::white};
+    TextParams text_;
+    double tiltAngle_ = 0, tiltAmount_ = 0;
+    QPointF strokeOrigin_;
+    QVector<QPointF> vecPts_;
+    QVector<float> vecPr_;
+    QVector<VecStroke> vecWork_;
+    int vecEditStroke_ = -1, vecEditPoint_ = -1;
+    QPointF gradStart_, gradEnd_;
+    bool grading_ = false;
+    QPointF textPos_;
+    void applySelectionClip(QPainter& p) const;
+    void setSelectionFromPath(const QPainterPath& path, Qt::KeyboardModifiers mods);
+    void wandSelect(const QPoint& seed, Qt::KeyboardModifiers mods);
+    void pickColorAt(const QPointF& ip);
+    void commitGradient(const QPointF& a, const QPointF& b);
+    void commitText(const QPointF& at);
+    QVector<QTransform> symmetryTransforms() const;
     bool selecting_ = false;
     QPoint selStart_;
     bool moving_ = false;

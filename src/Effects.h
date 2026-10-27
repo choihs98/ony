@@ -23,7 +23,9 @@ enum class Type {
     Noise, Vignette, DropShadow,
     // 스타일화
     Pixelate, Emboss, Edge, Outline, Sharpen,
-    Last = Sharpen
+    // 색 보정 (파라미터가 많아 FX 스택에는 세기 하나로만 들어간다)
+    Curves, Levels,
+    Last = Levels
 };
 
 struct ParamInfo {
@@ -36,6 +38,8 @@ QString categoryOf(Type t);
 QStringList categories();            // 메뉴 순서: 블러, 색, 왜곡, 키잉, 모션, 렌더링, 스타일화
 QVector<Type> typesIn(const QString& category);
 QImage crossfade(const QImage& a, const QImage& b, double t);     // 전환: 디졸브
+// 모양 보간(모프): 두 그림의 테두리까지의 거리를 섞어 중간 모양을 만든다. 선화에 잘 맞는다.
+QImage morph(const QImage& a, const QImage& b, double t);
 QImage wipe(const QImage& a, const QImage& b, double t, int dir); // 전환: 와이프 (0 좌→우, 1 우→좌, 2 위→아래, 3 아래→위)
 QImage slide(const QImage& a, const QImage& b, double t);         // 전환: 밀기 (좌→우)
 
@@ -48,6 +52,9 @@ QImage invert(const QImage& in);
 QImage grayscale(const QImage& in);
 QImage brightness(const QImage& in, int delta);
 QImage boxBlur(const QImage& in, int radius);
+QImage gaussBlur(const QImage& in, int radius);
+QImage curves(const QImage& in, const QVector<int>& lutR, const QVector<int>& lutG, const QVector<int>& lutB);
+QImage levels(const QImage& in, int inLow, int inHigh, double gamma, int outLow, int outHigh);
 QImage flipH(const QImage& in);
 QImage flipV(const QImage& in);
 

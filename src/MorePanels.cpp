@@ -138,6 +138,21 @@ GuidelinesPanel::GuidelinesPanel(CanvasWidget* canvas, QWidget* parent) : QWidge
     lay->addLayout(r2);
     lay->addWidget(center);
     lay->addWidget(thirds);
+    auto* rulerBox = new QComboBox;
+    rulerBox->addItems({QStringLiteral("끔"), QStringLiteral("수평 · 수직"), QStringLiteral("각도 지정")});
+    auto* rang = new QSpinBox; rang->setRange(-180, 180); rang->setValue(0); rang->setSuffix(QStringLiteral("°"));
+    auto* r3 = new QHBoxLayout;
+    r3->addWidget(new QLabel(QStringLiteral("직선자")));
+    r3->addWidget(rulerBox, 1);
+    r3->addWidget(rang);
+    lay->addLayout(r3);
+    auto* persp = new QCheckBox(QStringLiteral("원근 가이드 (소실점)"));
+    auto* vcnt = new QSpinBox; vcnt->setRange(1, 3); vcnt->setValue(1); vcnt->setSuffix(QStringLiteral(" 점"));
+    auto* r4 = new QHBoxLayout; r4->addWidget(persp); r4->addWidget(vcnt);
+    lay->addLayout(r4);
+    auto* snap = new QCheckBox(QStringLiteral("획을 소실점 방향으로 펴기"));
+    lay->addWidget(snap);
+    lay->addWidget(new QLabel(QStringLiteral("직선자·소실점을 켜면 획이 곧게 펴집니다.")));
     lay->addStretch();
     auto apply = [=] {
         CanvasWidget::Guides g;
@@ -147,11 +162,16 @@ GuidelinesPanel::GuidelinesPanel(CanvasWidget* canvas, QWidget* parent) : QWidge
         g.thirds = thirds->isChecked();
         g.safe = safe->isChecked();
         g.safePct = spct->value();
+        g.ruler = rulerBox->currentIndex();
+        g.rulerAngle = rang->value();
+        g.perspective = persp->isChecked();
+        g.vanishCount = vcnt->value();
+        g.snapToVanish = snap->isChecked();
         canvas->setGuides(g);
     };
-    for (auto* c : {grid, center, thirds, safe}) connect(c, &QCheckBox::toggled, this, apply);
-    connect(gsz, &QSpinBox::valueChanged, this, apply);
-    connect(spct, &QSpinBox::valueChanged, this, apply);
+    for (auto* c : {grid, center, thirds, safe, persp, snap}) connect(c, &QCheckBox::toggled, this, apply);
+    for (auto* s : {gsz, spct, rang, vcnt}) connect(s, &QSpinBox::valueChanged, this, apply);
+    connect(rulerBox, &QComboBox::currentIndexChanged, this, apply);
 }
 
 // ---------------------------------------------------------------- 라이트 테이블

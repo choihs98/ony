@@ -1,4 +1,7 @@
 #include "Panels.h"
+#include <QInputDialog>
+#include <QLineEdit>
+#include <QMenu>
 #include <QFormLayout>
 #include "Document.h"
 
@@ -59,6 +62,12 @@ MainPanel::MainPanel(QWidget* parent) : QWidget(parent) {
         {"spline", "스플라인 (클릭으로 점 추가, 더블클릭/Enter 로 확정)"}, {"fill", "페인트통 (CTG 선화 레이어에서는 CTG 채우기)"},
         {"select", "선택 / 이동"},          {"rig", "리깅 / 핀 워프 (클릭=핀, Shift+클릭=고정 핀, Enter=적용)"},
         {"crop", "자르기 / 선택"},          {"transform", "변형 (변형 대화상자 열기). 화면 이동: 스페이스 / 가운데 버튼"},
+        {"pick", "색 추출 (스포이트). 다른 도구에서도 Alt+클릭"},
+        {"lasso", "올가미 선택 (끌어서 그리기). Shift=더하기, Alt=빼기"},
+        {"polygon", "다각형 선택 (클릭으로 점 추가, 첫 점을 다시 클릭하면 완성)"},
+        {"wand", "마술봉 선택 (비슷한 색 영역). Shift=더하기, Alt=빼기"},
+        {"gradient", "그라디언트 (A 색 → B 색, 끌어서 방향 지정)"},
+        {"text", "글자 넣기 (도구 패널 옵션에서 내용 입력)"},
     };
     auto* grid = new QGridLayout;
     grid->setSpacing(2);
@@ -275,24 +284,11 @@ ColorPanel::ColorPanel(QWidget* parent) : QWidget(parent) {
     rgb_->setAlignment(Qt::AlignCenter);
     lay->addWidget(rgb_);
 
-    auto* sw = new QGridLayout;
-    sw->setSpacing(2);
-    const QColor palette[] = {
-        QColor("#000000"), QColor("#ffffff"), QColor("#808080"), QColor("#c0c0c0"),
-        QColor("#e53935"), QColor("#fb8c00"), QColor("#fdd835"), QColor("#43a047"),
-        QColor("#00acc1"), QColor("#1e88e5"), QColor("#5e35b1"), QColor("#d81b60"),
-        QColor("#6d4c41"), QColor("#ffcc80"), QColor("#a5d6a7"), QColor("#90caf9"),
-    };
-    int i = 0;
-    for (const QColor& c : palette) {
-        auto* b = new QToolButton;
-        b->setFixedSize(16, 16);
-        b->setStyleSheet(QString("background:%1;border:1px solid #333;").arg(c.name()));
-        connect(b, &QToolButton::clicked, this, [this, c] { setColorA(c); });
-        sw->addWidget(b, i / 8, i % 8);
-        ++i;
-    }
-    lay->addLayout(sw);
+    swatchGrid_ = new QGridLayout;
+    swatchGrid_->setSpacing(2);
+    swatches_ = defaultPalette();
+    lay->addLayout(swatchGrid_);
+    rebuildSwatches();
 
     connect(wheel_, &ColorWheel::colorChanged, this, [this](const QColor& c) {
         if (syncing_) return;
@@ -319,6 +315,54 @@ void ColorPanel::setColorA(const QColor& c) {
     a_ = c;
     refresh();
     emit colorAChanged(a_);
+}
+
+QVector<QColor> ColorPanel::defaultPalette() {
+    return {QColor("#000000"), QColor("#ffffff"), QColor("#808080"), QColor("#c0c0c0"),
+            QColor("#e53935"), QColor("#fb8c00"), QColor("#fdd835"), QColor("#43a047"),
+            QColor("#00acc1"), QColor("#1e88e5"), QColor("#5e35b1"), QColor("#d81b60"),
+            QColor("#6d4c41"), QColor("#ffcc80"), QColor("#a5d6a7"), QColor("#90caf9")};
+}
+
+void ColorPanel::rebuildSwatches() {
+    if (!swatchGrid_) return;
+    while (QLayoutItem* it = swatchGrid_->takeAt(0)) {
+        if (it->widget()) it->widget()->deleteLater();
+        delete it;
+    }
+    for (int i = 0; i < swatches_.size(); ++i) {
+        const QColor c = swatches_[i];
+        auto* b = new QToolButton;
+        b->setFixedSize(16, 16);
+        b->setStyleSheet(QString("background:%1;border:1px solid #333;").arg(c.name()));
+        b->setToolTip(QString("%1\n왼쪽 클릭: 이 색 쓰기 / 오른쪽 클릭: 지금 A 색으로 바꾸기").arg(c.name().toUpper()));
+        b->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(b, &QToolButton::clicked, this, [this, c] { setColorA(c); });
+        connect(b, &QToolButton::customContextMenuRequested, this, [this, i] {
+            if (i >= 0 && i < swatches_.size()) {
+                swatches_[i] = a_;
+                rebuildSwatches();
+            }
+        });
+        swatchGrid_->addWidget(b, i / 8, i % 8);
+    }
+    auto* add = new QToolButton;
+    add->setFixedSize(16, 16);
+    add->setText("+");
+    add->setToolTip(QStringLiteral("지금 A 색을 견본에 더하기"));
+    connect(add, &QToolButton::clicked, this, [this] {
+        swatches_.push_back(a_);
+        rebuildSwatches();
+    });
+    swatchGrid_->addWidget(add, swatches_.size() / 8, swatches_.size() % 8);
+}
+
+void ColorPanel::setSwatches(const QVector<QColor>& cols) {
+    swatches_.clear();
+    for (const QColor& c : cols)
+        if (c.isValid() && swatches_.size() < 200) swatches_.push_back(c);
+    if (swatches_.isEmpty()) swatches_ = defaultPalette();
+    rebuildSwatches();
 }
 
 void ColorPanel::swapColors() {
@@ -401,6 +445,25 @@ ToolPanel::ToolPanel(QWidget* parent) : QWidget(parent) {
     makeRow(QStringLiteral("불투명도"), 1, 100, 100, opacity_, opacityV_, QStringLiteral("%"));
     pressure_ = new QCheckBox(QStringLiteral("필압 사용"));
     lay->addWidget(pressure_);
+    auto* smoothRow = new QHBoxLayout;
+    smoothLabel_ = new QLabel(QStringLiteral("보정 세기"));
+    smooth_ = new QSlider(Qt::Horizontal);
+    smooth_->setRange(1, 99);
+    smooth_->setValue(60);
+    smoothV_ = new QSpinBox;
+    smoothV_->setRange(1, 99);
+    smoothV_->setValue(60);
+    smooth_->setToolTip(QStringLiteral("손떨림 보정 세기. 클수록 선이 매끄럽지만 커서를 늦게 따라옵니다.\n메인 패널의 보정 버튼을 켜야 효과가 있습니다."));
+    smoothRow->addWidget(smoothLabel_);
+    smoothRow->addWidget(smooth_, 1);
+    smoothRow->addWidget(smoothV_);
+    lay->addLayout(smoothRow);
+    tilt_ = new QCheckBox(QStringLiteral("펜 기울기 사용 (붓이 납작해짐)"));
+    tilt_->setToolTip(QStringLiteral("기울기를 지원하는 태블릿에서만 효과가 있습니다."));
+    lay->addWidget(tilt_);
+    customRow_ = new QComboBox;
+    customRow_->addItem(QStringLiteral("브러시 모양: 기본"), -1);
+    lay->addWidget(customRow_);
     lay->addStretch();
 
     // 슬라이더 <-> 숫자 칸 동기화
@@ -416,6 +479,14 @@ ToolPanel::ToolPanel(QWidget* parent) : QWidget(parent) {
     link(opacity_, opacityV_);
     link(hardness_, hardnessV_);
     connect(pressure_, &QCheckBox::toggled, this, [this](bool) { emitParams(); });
+    connect(tilt_, &QCheckBox::toggled, this, [this](bool) { emitParams(); });
+    connect(smooth_, &QSlider::valueChanged, this, [this](int v) {
+        QSignalBlocker b(smoothV_);
+        smoothV_->setValue(v);
+        emit smoothingStrengthChanged(v);
+    });
+    connect(smoothV_, &QSpinBox::valueChanged, this, [this](int v) { smooth_->setValue(v); });
+    connect(customRow_, &QComboBox::currentIndexChanged, this, [this](int) { emitParams(); });
     connect(list_, &QListWidget::currentRowChanged, this, [this](int row) {
         if (row < 0) return;
         // 프리셋의 기본 크기/불투명도/경도/필압을 적용한다
@@ -450,6 +521,8 @@ BrushParams ToolPanel::params() const {
     p.opacity = opacity_->value();
     p.hardness = hardness_->value();
     p.pressure = pressure_->isChecked();
+    p.tilt = tilt_->isChecked();
+    p.customBrush = customRow_ ? customRow_->currentData().toInt() : -1;
     p.preset = std::max(0, list_->currentRow());
     return p;
 }
@@ -463,6 +536,22 @@ void ToolPanel::setParams(const BrushParams& p) {
     hardness_->setValue(p.hardness);
     hardnessV_->setValue(p.hardness);
     pressure_->setChecked(p.pressure);
+    QSignalBlocker b8(tilt_), b9(customRow_);
+    tilt_->setChecked(p.tilt);
+    const int ci = customRow_->findData(p.customBrush);
+    customRow_->setCurrentIndex(ci >= 0 ? ci : 0);
+}
+
+// 사용자 브러시 목록을 다시 만든다 (브러시를 더하거나 지운 뒤 호출)
+void ToolPanel::refreshCustomBrushes() {
+    if (!customRow_) return;
+    const int keep = customRow_->currentData().toInt();
+    QSignalBlocker b(customRow_);
+    customRow_->clear();
+    customRow_->addItem(QStringLiteral("브러시 모양: 기본"), -1);
+    for (int i = 0; i < customBrushCount(); ++i) customRow_->addItem(QStringLiteral("모양: ") + customBrushName(i), i);
+    const int ci = customRow_->findData(keep);
+    customRow_->setCurrentIndex(ci >= 0 ? ci : 0);
 }
 
 void ToolPanel::setRow(int row) {
@@ -787,12 +876,52 @@ void CameraPanel::sync() {
 LibraryPanel::LibraryPanel(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) {
     auto* lay = new QVBoxLayout(this);
     lay->setContentsMargins(4, 4, 4, 4);
+    auto* top = new QHBoxLayout;
+    search_ = new QLineEdit;
+    search_->setPlaceholderText(QStringLiteral("이름 · 분류로 찾기"));
+    search_->setClearButtonEnabled(true);
+    cat_ = new QComboBox;
+    cat_->setMinimumWidth(90);
+    top->addWidget(search_, 1);
+    top->addWidget(cat_);
+    lay->addLayout(top);
     list_ = new QListWidget;
     list_->setViewMode(QListView::IconMode);
     list_->setIconSize(QSize(64, 48));
     list_->setResizeMode(QListView::Adjust);
     list_->setMovement(QListView::Static);
+    list_->setContextMenuPolicy(Qt::CustomContextMenu);
     lay->addWidget(list_, 1);
+    connect(search_, &QLineEdit::textChanged, this, [this] { rebuild(); });
+    connect(cat_, &QComboBox::currentIndexChanged, this, [this] {
+        if (!syncing_) rebuild();
+    });
+    connect(list_, &QListWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        QListWidgetItem* it = list_->itemAt(pos);
+        if (!it) return;
+        const int idx = it->data(Qt::UserRole).toInt();
+        QMenu menu(this);
+        menu.addAction(QStringLiteral("이름 바꾸기..."), this, [this, idx] {
+            bool ok = false;
+            const QString n = QInputDialog::getText(this, QStringLiteral("이름 바꾸기"), QStringLiteral("이름:"),
+                                                    QLineEdit::Normal, doc_->libraryName(idx), &ok);
+            if (ok) doc_->setLibraryName(idx, n);
+        });
+        menu.addAction(QStringLiteral("분류 정하기..."), this, [this, idx] {
+            QStringList cats = doc_->libraryCategories();
+            cats.prepend(QStringLiteral("(분류 없음)"));
+            bool ok = false;
+            const QString cur = doc_->libraryCategory(idx);
+            const QString s = QInputDialog::getItem(this, QStringLiteral("분류"),
+                                                    QStringLiteral("분류 (직접 입력해도 됩니다):"), cats,
+                                                    int(std::max<qsizetype>(0, cats.indexOf(cur))), true, &ok);
+            if (!ok) return;
+            doc_->setLibraryCategory(idx, s == QStringLiteral("(분류 없음)") ? QString() : s);
+        });
+        menu.addSeparator();
+        menu.addAction(QStringLiteral("삭제"), this, [this, idx] { doc_->removeFromLibrary(idx); });
+        menu.exec(list_->mapToGlobal(pos));
+    });
     auto* row = new QHBoxLayout;
     auto add = [&](const QString& t, const QString& tip, auto fn) {
         auto* b = new QToolButton;
@@ -807,8 +936,9 @@ LibraryPanel::LibraryPanel(Document* doc, QWidget* parent) : QWidget(parent), do
         doc_->addToLibrary(QString("이미지 %1").arg(doc_->libraryCount() + 1), doc_->keyImage(doc_->currentLayer(), k));
     });
     add("삽입", "선택한 이미지를 현재 프레임에 삽입", [this] {
-        const int i = list_->currentRow();
-        if (i < 0) return;
+        QListWidgetItem* it = list_->currentItem();
+        if (!it) return;
+        const int i = it->data(Qt::UserRole).toInt();
         const int l = doc_->currentLayer(), f = doc_->currentFrame();
         if (doc_->layer(l).locked) return;
         QImage img = doc_->libraryImage(i);
@@ -821,7 +951,21 @@ LibraryPanel::LibraryPanel(Document* doc, QWidget* parent) : QWidget(parent), do
         }
         doc_->pushKeyEdit(l, f, doc_->layer(l).frames[f], full, QStringLiteral("라이브러리 이미지 삽입"));
     });
-    add("삭제", "라이브러리에서 삭제", [this] { doc_->removeFromLibrary(list_->currentRow()); });
+    add("삭제", "라이브러리에서 삭제", [this] {
+        QListWidgetItem* it = list_->currentItem();
+        if (it) doc_->removeFromLibrary(it->data(Qt::UserRole).toInt());
+    });
+    add("분류", "선택한 이미지의 분류를 정합니다", [this] {
+        QListWidgetItem* it = list_->currentItem();
+        if (!it) return;
+        const int idx = it->data(Qt::UserRole).toInt();
+        QStringList cats = doc_->libraryCategories();
+        cats.prepend(QStringLiteral("(분류 없음)"));
+        bool ok = false;
+        const QString s = QInputDialog::getItem(this, QStringLiteral("분류"), QStringLiteral("분류 (직접 입력해도 됩니다):"),
+                                                cats, int(std::max<qsizetype>(0, cats.indexOf(doc_->libraryCategory(idx)))), true, &ok);
+        if (ok) doc_->setLibraryCategory(idx, s == QStringLiteral("(분류 없음)") ? QString() : s);
+    });
     row->addStretch();
     lay->addLayout(row);
     connect(doc_, &Document::libraryChanged, this, &LibraryPanel::rebuild);
@@ -829,16 +973,37 @@ LibraryPanel::LibraryPanel(Document* doc, QWidget* parent) : QWidget(parent), do
 }
 
 void LibraryPanel::rebuild() {
+    const QString q = search_ ? search_->text().trimmed() : QString();
+    const QString pickedCat = (cat_ && cat_->currentIndex() > 0) ? cat_->currentText() : QString();
+    // 분류 목록 다시 만들기 (고른 분류는 유지)
+    if (cat_) {
+        syncing_ = true;
+        const QString keep = cat_->currentIndex() > 0 ? cat_->currentText() : QString();
+        cat_->clear();
+        cat_->addItem(QStringLiteral("분류: 전체"));
+        for (const QString& c : doc_->libraryCategories()) cat_->addItem(c);
+        const int ki = keep.isEmpty() ? 0 : cat_->findText(keep);
+        cat_->setCurrentIndex(ki >= 0 ? ki : 0);
+        syncing_ = false;
+    }
     list_->clear();
+    int shown = 0;
     for (int i = 0; i < doc_->libraryCount(); ++i) {
-        QImage thumb = doc_->libraryImage(i).scaled(64, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        QImage bg(thumb.size(), QImage::Format_ARGB32_Premultiplied);
-        bg.fill(Qt::white);
-        QPainter p(&bg);
-        p.drawImage(0, 0, thumb);
-        p.end();
-        auto* it = new QListWidgetItem(QIcon(QPixmap::fromImage(bg)), doc_->libraryName(i));
-        list_->addItem(it);
+        const QString name = doc_->libraryName(i);
+        const QString c = doc_->libraryCategory(i);
+        if (!pickedCat.isEmpty() && c != pickedCat) continue;
+        if (!q.isEmpty() && !name.contains(q, Qt::CaseInsensitive) && !c.contains(q, Qt::CaseInsensitive)) continue;
+        const QImage thumb = doc_->libraryImage(i).scaled(64, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        auto* item = new QListWidgetItem(QIcon(QPixmap::fromImage(thumb)), c.isEmpty() ? name : name + "\n[" + c + "]");
+        item->setData(Qt::UserRole, i);
+        item->setToolTip(c.isEmpty() ? name : QString("%1\n분류: %2").arg(name, c));
+        list_->addItem(item);
+        ++shown;
+    }
+    if (shown == 0 && doc_->libraryCount() > 0) {
+        auto* item = new QListWidgetItem(QStringLiteral("(찾는 이미지가 없습니다)"));
+        item->setFlags(Qt::NoItemFlags);
+        list_->addItem(item);
     }
 }
 

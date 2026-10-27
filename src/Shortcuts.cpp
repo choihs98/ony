@@ -1,5 +1,9 @@
 #include <algorithm>
 #include "Shortcuts.h"
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
 
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -121,6 +125,46 @@ void Shortcuts::resetAll() {
 }
 
 // ---------------------------------------------------------------- 설정 창
+QString Shortcuts::saveProfile(const QString& path) const {
+    QJsonObject keys;
+    for (const Cmd& c : cmds_) {
+        const QKeySequence ks = current(c.id);
+        if (ks != c.def) keys[c.id] = ks.toString(QKeySequence::PortableText);
+    }
+    QJsonObject root;
+    root["type"] = "ony-shortcuts";
+    root["version"] = 1;
+    root["keys"] = keys;
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) return QStringLiteral("파일을 만들 수 없습니다.");
+    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    return {};
+}
+
+QString Shortcuts::loadProfile(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return QStringLiteral("파일을 열 수 없습니다.");
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) return QStringLiteral("단축키 파일이 아닙니다.");
+    const QJsonObject root = doc.object();
+    if (root.value("type").toString() != QStringLiteral("ony-shortcuts")) return QStringLiteral("ONY 단축키 파일이 아닙니다.");
+    resetAll();
+    const QJsonObject keys = root.value("keys").toObject();
+    int n = 0;
+    for (auto it = keys.begin(); it != keys.end(); ++it) {
+        const QString ks = it.value().toString();
+        for (const Cmd& c : cmds_)
+            if (c.id == it.key()) {
+                set(c.id, QKeySequence(ks, QKeySequence::PortableText));
+                ++n;
+                break;
+            }
+    }
+    emit changed();
+    return {};
+}
+
 void showShortcutDialog(QWidget* parent) {
     Shortcuts& S = Shortcuts::instance();
     QDialog dlg(parent);

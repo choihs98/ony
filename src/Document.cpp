@@ -5,6 +5,7 @@
 #include <QDataStream>
 #include <QFile>
 #include <QPainter>
+#include <QPainterPath>
 #include <QUndoCommand>
 #include <QUndoStack>
 #include <algorithm>
@@ -50,6 +51,7 @@ void Document::newProject(QSize size, int frameCount, int fps) {
     folders_.clear();
     cameraEnabled_ = false;
     cameraKeys_.clear();
+    libCats_.clear();
     renderCam_ = RenderCamera();
     strokes_.clear();
     recording_ = false;
@@ -278,27 +280,51 @@ QImage Document::stencilMaskFor(int layer, int frame) const {
 }
 
 // ---------------- 합성 ----------------
-void Document::drawLayers(QImage& target, const QTransform& xf, int frame) const {
+// 레이어의 FX 를 적용한 그림. 같은 그림·같은 효과면 캐시에서 꺼낸다.
+QImage Document::fxApplied(int layer, int key, const QImage& src) const {
+    const Layer& L = layers_[layer];
+    if (L.fx.isEmpty()) return src;
+    QString sig;
+    for (const auto& f : L.fx) sig += QString::number(int(f.type)) + ':' + QString::number(f.param) + ';';
+    const quint64 ck = (quint64(layer) << 32) | quint32(key);
+    auto it = fxCache_.find(ck);
+    if (it != fxCache_.end() && it->srcKey == src.cacheKey() && it->sig == sig && it->out.size() == src.size())
+        return it->out;
+    QImage out = src;
+    for (const auto& f : L.fx) out = Effects::apply(out, f);
+    FxCacheEntry e;
+    e.srcKey = src.cacheKey();
+    e.sig = sig;
+    e.out = out;
+    if (fxCache_.size() > 96) fxCache_.clear();   // 너무 커지면 비운다
+    fxCache_.insert(ck, e);
+    return out;
+}
+
+void Document::drawLayers(QImage& target, const QTransform& xf, int frame, const QRect& clip) const {
     for (int l = 0; l < layers_.size(); ++l) {
         const Layer& L = layers_[l];
         bool vis = L.visible;
         qreal op = L.opacity;
         if (L.folder >= 0 && L.folder < folders_.size()) {
-            vis = vis && folders_[L.folder].visible;
-            op *= folders_[L.folder].opacity;
+            vis = vis && folderVisibleEffective(L.folder);
+            op *= folderOpacityEffective(L.folder);
         }
         if (soloCurrent_) vis = (l == curLayer_);
         if (!vis) continue;
         const int k = resolveKey(l, frame);
         if (k < 0) continue;
-        QImage img = L.frames[k];
-        for (const auto& fx : L.fx) img = Effects::apply(img, fx);
+        const QImage img = fxApplied(l, k, L.frames[k]);
         const QTransform lxf = L.puppet ? puppetTransform(l, frame) * xf : xf;
         if (L.blend == 0) {
             QPainter p(&target);
+            if (!clip.isNull()) p.setClipRect(clip);
             p.setTransform(lxf);
             p.setOpacity(op);
             p.drawImage(0, 0, img);
+        } else if (lxf.isIdentity() && img.size() == target.size()) {
+            // 변환이 없으면 중간 그림을 만들 필요가 없다 (가장 흔한 경우)
+            Blend::apply(target, img, L.blend, op);
         } else {
             // 블렌딩 모드: 같은 변환으로 레이어를 따로 그린 뒤 픽셀 단위로 섞는다
             QImage layerImg(target.size(), QImage::Format_ARGB32_Premultiplied);
@@ -311,6 +337,22 @@ void Document::drawLayers(QImage& target, const QTransform& xf, int frame) const
             Blend::apply(target, layerImg, L.blend, op);
         }
     }
+}
+
+// 일부만 다시 그리기. 블렌딩·카메라·프록시가 없을 때만 된다.
+bool Document::compositeRegion(QImage& target, const QRect& region, int frame, bool paper) const {
+    if (proxyDiv_ > 1 || target.size() != size_) return false;
+    for (const Layer& L : layers_)
+        if (L.visible && L.blend != 0) return false;
+    const QRect r = region.intersected(QRect(QPoint(0, 0), size_));
+    if (r.isEmpty()) return true;
+    {
+        QPainter p(&target);
+        p.setCompositionMode(QPainter::CompositionMode_Source);
+        p.fillRect(r, paper ? QColor(Qt::white) : QColor(Qt::transparent));
+    }
+    drawLayers(target, QTransform(), frame, r);
+    return true;
 }
 
 QImage Document::composite(int frame, bool paper, bool useCamera) const {
@@ -413,8 +455,7 @@ bool Document::mergeDown(int i) {
             const int k = keyIndexAt(&L - layers_.constData(), f);
             if (k < 0 || !L.visible) return;
             p.setOpacity(L.opacity);
-            QImage src = L.frames[k];
-            for (const auto& fx : L.fx) src = Effects::apply(src, fx);
+            const QImage src = fxApplied(&L - layers_.constData(), k, L.frames[k]);
             p.drawImage(0, 0, src);
         };
         draw(dn);
@@ -591,6 +632,165 @@ static CameraKey interpKeys(const QMap<int, CameraKey>& cameraKeys_, int frame) 
 
 CameraKey Document::cameraAt(int frame) const { return interpKeys(cameraKeys_, frame); }
 
+// ---------------- 폴더 중첩 ----------------
+void Document::setFolderParent(int folder, int parent) {
+    if (folder < 0 || folder >= folders_.size()) return;
+    if (parent == folder) return;
+    if (parent < -1 || parent >= folders_.size()) parent = -1;
+    // 순환 방지: parent 의 조상에 folder 가 있으면 거절
+    for (int cur = parent, guard = 0; cur >= 0 && guard < 64; cur = folders_[cur].parent, ++guard)
+        if (cur == folder) return;
+    folders_[folder].parent = parent;
+    setModified(true);
+    notifyStructure();
+}
+
+int Document::folderDepth(int folder) const {
+    int d = 0;
+    for (int cur = folder; cur >= 0 && cur < folders_.size() && d < 64; cur = folders_[cur].parent) {
+        if (folders_[cur].parent < 0) break;
+        ++d;
+    }
+    return d;
+}
+
+bool Document::folderVisibleEffective(int folder) const {
+    for (int cur = folder, guard = 0; cur >= 0 && cur < folders_.size() && guard < 64; cur = folders_[cur].parent, ++guard)
+        if (!folders_[cur].visible) return false;
+    return true;
+}
+
+qreal Document::folderOpacityEffective(int folder) const {
+    qreal op = 1.0;
+    for (int cur = folder, guard = 0; cur >= 0 && cur < folders_.size() && guard < 64; cur = folders_[cur].parent, ++guard)
+        op *= folders_[cur].opacity;
+    return op;
+}
+
+QString Document::folderPath(int folder) const {
+    QStringList parts;
+    for (int cur = folder, guard = 0; cur >= 0 && cur < folders_.size() && guard < 64; cur = folders_[cur].parent, ++guard)
+        parts.prepend(folders_[cur].name);
+    return parts.join(QStringLiteral(" / "));
+}
+
+// ---------------- 타임라인 프레임 편집 ----------------
+FrameClip Document::copyFrames(int layer, int a, int b, bool allLayers) const {
+    FrameClip c;
+    if (frameCount_ <= 0) return c;
+    a = std::clamp(a, 0, frameCount_ - 1);
+    b = std::clamp(b, a, frameCount_ - 1);
+    c.size = size_;
+    c.count = b - a + 1;
+    const int l0 = allLayers ? 0 : std::clamp(layer, 0, int(layers_.size()) - 1);
+    const int l1 = allLayers ? layers_.size() - 1 : l0;
+    for (int l = l0; l <= l1; ++l) {
+        QVector<QImage> col;
+        col.reserve(c.count);
+        for (int f = a; f <= b; ++f) {
+            if (f == a) {
+                // 구간 맨 앞이 홀드면 직전 키 이미지를 이어받아, 붙여 넣어도 같은 그림이 나오게 한다
+                const int k = keyIndexAt(l, f);
+                col.push_back(k < 0 ? QImage() : layers_[l].frames[k]);
+            } else {
+                col.push_back(layers_[l].frames[f]);
+            }
+        }
+        c.data.push_back(col);
+        c.layerNames << layers_[l].name;
+    }
+    return c;
+}
+
+bool Document::pasteFrames(int layer, int at, const FrameClip& c, bool insert) {
+    if (c.isEmpty() || c.size != size_) return false;
+    at = std::clamp(at, 0, frameCount_);
+    const int n = c.data.size();
+    const int l0 = std::clamp(layer, 0, int(layers_.size()) - 1);
+    if (insert) {
+        for (auto& L : layers_) {
+            for (int i = 0; i < c.count; ++i) L.frames.insert(at, QImage());
+        }
+        frameCount_ += c.count;
+    } else if (at + c.count > frameCount_) {
+        const int add = at + c.count - frameCount_;
+        for (auto& L : layers_)
+            for (int i = 0; i < add; ++i) L.frames.push_back(QImage());
+        frameCount_ += add;
+    }
+    for (int i = 0; i < n; ++i) {
+        const int l = l0 + i;
+        if (l >= layers_.size()) break;
+        for (int f = 0; f < c.count; ++f) layers_[l].frames[at + f] = c.data[i][f];
+        // 붙여 넣은 구간 바로 뒤가 홀드였다면, 원래 보이던 그림이 유지되도록 키를 세운다
+        const int after = at + c.count;
+        if (!insert && after < frameCount_ && layers_[l].frames[after].isNull()) {
+            // 덮어쓰기 전의 그림은 알 수 없으므로 그대로 둔다 (홀드가 새 그림을 이어받는다)
+        }
+    }
+    undo_->clear();
+    setModified(true);
+    notifyStructure();
+    return true;
+}
+
+bool Document::deleteFrames(int layer, int a, int b, bool allLayers, bool shift) {
+    if (frameCount_ <= 0) return false;
+    a = std::clamp(a, 0, frameCount_ - 1);
+    b = std::clamp(b, a, frameCount_ - 1);
+    const int n = b - a + 1;
+    if (shift) {
+        if (n >= frameCount_) return false;   // 전부 지울 수는 없다
+        for (auto& L : layers_) {
+            // 지우는 구간 바로 뒤가 홀드면, 보이던 그림이 사라지지 않게 키를 세운다
+            if (b + 1 < frameCount_ && L.frames[b + 1].isNull()) {
+                const int k = keyIndexAt(&L - layers_.constData(), b);
+                if (k >= 0) L.frames[b + 1] = L.frames[k];
+            }
+            L.frames.remove(a, n);
+        }
+        frameCount_ -= n;
+    } else {
+        const int l0 = allLayers ? 0 : std::clamp(layer, 0, int(layers_.size()) - 1);
+        const int l1 = allLayers ? layers_.size() - 1 : l0;
+        for (int l = l0; l <= l1; ++l)
+            for (int f = a; f <= b; ++f) layers_[l].frames[f] = QImage();
+    }
+    curFrame_ = std::clamp(curFrame_, 0, frameCount_ - 1);
+    undo_->clear();
+    setModified(true);
+    notifyStructure();
+    emit currentChanged();
+    return true;
+}
+
+bool Document::moveFrames(int layer, int a, int b, int dest, bool allLayers) {
+    const FrameClip c = copyFrames(layer, a, b, allLayers);
+    if (c.isEmpty()) return false;
+    a = std::clamp(a, 0, frameCount_ - 1);
+    b = std::clamp(b, a, frameCount_ - 1);
+    if (dest >= a && dest <= b + 1) return false;   // 제자리
+    const int n = b - a + 1;
+    const int l0 = allLayers ? 0 : std::clamp(layer, 0, int(layers_.size()) - 1);
+    const int l1 = allLayers ? layers_.size() - 1 : l0;
+    for (int l = l0; l <= l1; ++l) {
+        QVector<QImage>& fr = layers_[l].frames;
+        const QVector<QImage>& src = c.data[allLayers ? l : 0];
+        QVector<QImage> rest;
+        rest.reserve(frameCount_);
+        for (int f = 0; f < frameCount_; ++f)
+            if (f < a || f > b) rest.push_back(fr[f]);
+        const int insertAt = dest > b ? dest - n : dest;
+        for (int i = 0; i < n; ++i) rest.insert(std::clamp(insertAt, 0, int(rest.size())) + i, src[i]);
+        rest.resize(frameCount_);
+        fr = rest;
+    }
+    undo_->clear();
+    setModified(true);
+    notifyStructure();
+    return true;
+}
+
 // ---------------- 드로잉 레코더 ----------------
 void Document::addStroke(const StrokeRec& s) {
     if (s.pts.isEmpty()) return;
@@ -681,6 +881,211 @@ int Document::strokesToFrames(int srcFrame, int startFrame, int nFrames, bool by
     notifyStructure();
     emit currentChanged();
     return curLayer_;
+}
+
+// ---------------- 벡터 레이어 ----------------
+void Document::setVectorLayer(int layer, bool on) {
+    if (layer < 0 || layer >= layers_.size()) return;
+    if (layers_[layer].vector == on) return;
+    layers_[layer].vector = on;
+    if (!on) layers_[layer].vstrokes.clear();
+    setModified(true);
+    notifyStructure();
+}
+
+const QVector<VecStroke>* Document::vectorStrokes(int layer, int frame) const {
+    if (layer < 0 || layer >= layers_.size() || !layers_[layer].vector) return nullptr;
+    const int k = keyIndexAt(layer, frame);
+    const int use = layers_[layer].vstrokes.contains(frame) ? frame : k;
+    auto it = layers_[layer].vstrokes.constFind(use);
+    return it == layers_[layer].vstrokes.constEnd() ? nullptr : &it.value();
+}
+
+int Document::vectorStrokeCount(int layer, int frame) const {
+    const QVector<VecStroke>* s = vectorStrokes(layer, frame);
+    return s ? s->size() : 0;
+}
+
+QImage Document::renderVectorFrame(int layer, int frame) const {
+    QImage out(size_, QImage::Format_ARGB32_Premultiplied);
+    out.fill(Qt::transparent);
+    const QVector<VecStroke>* list = vectorStrokes(layer, frame);
+    if (!list) return out;
+    QPainter p(&out);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    for (const VecStroke& s : *list) {
+        if (!s.visible || s.pts.size() < 1) continue;
+        QPainterPath path;
+        path.moveTo(s.pts[0]);
+        if (s.pts.size() == 1) path.addEllipse(s.pts[0], s.width / 2, s.width / 2);
+        for (int i = 1; i < s.pts.size(); ++i) {
+            // 점 사이를 부드럽게 잇는다 (카트멀-롬 비슷하게)
+            const QPointF p1 = s.pts[i - 1], p2 = s.pts[i];
+            const QPointF p0 = i > 1 ? s.pts[i - 2] : p1;
+            const QPointF p3 = i + 1 < s.pts.size() ? s.pts[i + 1] : p2;
+            path.cubicTo(p1 + (p2 - p0) / 6.0, p2 - (p3 - p1) / 6.0, p2);
+        }
+        if (s.closed) path.closeSubpath();
+        p.setCompositionMode(s.eraser ? QPainter::CompositionMode_DestinationOut : QPainter::CompositionMode_SourceOver);
+        if (s.filled && s.pts.size() > 2) {
+            p.setBrush(s.fill);
+            p.setPen(Qt::NoPen);
+            p.drawPath(path);
+        }
+        if (s.width > 0) {
+            p.setBrush(Qt::NoBrush);
+            p.setPen(QPen(s.eraser ? QColor(Qt::black) : s.color, std::max(0.5, s.width), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.drawPath(path);
+        }
+    }
+    return out;
+}
+
+void Document::rebuildVectorFrame(int layer, int frame) {
+    if (layer < 0 || layer >= layers_.size() || !layers_[layer].vector) return;
+    if (frame < 0 || frame >= frameCount_) return;
+    layers_[layer].frames[frame] = renderVectorFrame(layer, frame);
+    setModified(true);
+    emit changed();
+}
+
+void Document::setVectorStrokes(int layer, int frame, const QVector<VecStroke>& s) {
+    if (layer < 0 || layer >= layers_.size() || !layers_[layer].vector) return;
+    if (s.isEmpty()) layers_[layer].vstrokes.remove(frame);
+    else layers_[layer].vstrokes[frame] = s;
+    rebuildVectorFrame(layer, frame);
+    notifyStructure();
+}
+
+void Document::addVectorStroke(int layer, int frame, const VecStroke& s) {
+    if (layer < 0 || layer >= layers_.size() || !layers_[layer].vector || s.pts.isEmpty()) return;
+    // 홀드 프레임에 그리면 그 자리에 새 키가 생긴다 (앞 키의 획을 물려받는다)
+    if (!layers_[layer].vstrokes.contains(frame)) {
+        const QVector<VecStroke>* prev = vectorStrokes(layer, frame);
+        layers_[layer].vstrokes[frame] = prev ? *prev : QVector<VecStroke>();
+    }
+    layers_[layer].vstrokes[frame].push_back(s);
+    rebuildVectorFrame(layer, frame);
+    notifyStructure();
+}
+
+void Document::flattenVectorLayer(int layer) {
+    if (layer < 0 || layer >= layers_.size() || !layers_[layer].vector) return;
+    for (auto it = layers_[layer].vstrokes.cbegin(); it != layers_[layer].vstrokes.cend(); ++it)
+        if (it.key() >= 0 && it.key() < frameCount_) layers_[layer].frames[it.key()] = renderVectorFrame(layer, it.key());
+    layers_[layer].vstrokes.clear();
+    layers_[layer].vector = false;
+    undo_->clear();
+    setModified(true);
+    notifyStructure();
+}
+
+// 획 하나를 n 개의 점으로 고르게 다시 뽑는다
+static QVector<QPointF> resampleStroke(const QVector<QPointF>& pts, int n) {
+    QVector<QPointF> out;
+    if (pts.isEmpty() || n < 2) return pts;
+    if (pts.size() == 1) {
+        for (int i = 0; i < n; ++i) out.push_back(pts[0]);
+        return out;
+    }
+    QVector<double> acc{0.0};
+    for (int i = 1; i < pts.size(); ++i)
+        acc.push_back(acc.last() + std::hypot(pts[i].x() - pts[i - 1].x(), pts[i].y() - pts[i - 1].y()));
+    const double total = acc.last();
+    for (int i = 0; i < n; ++i) {
+        const double d = total * i / (n - 1);
+        int k = 0;
+        while (k + 1 < acc.size() - 1 && acc[k + 1] < d) ++k;
+        const double seg = acc[k + 1] - acc[k];
+        const double u = seg < 1e-9 ? 0.0 : (d - acc[k]) / seg;
+        out.push_back(pts[k] + (pts[k + 1] - pts[k]) * u);
+    }
+    return out;
+}
+
+QVector<VecStroke> Document::interpolateStrokes(const QVector<VecStroke>& a, const QVector<VecStroke>& b, double t) {
+    t = std::clamp(t, 0.0, 1.0);
+    QVector<VecStroke> out;
+    const int n = std::max(a.size(), b.size());
+    for (int i = 0; i < n; ++i) {
+        const bool ha = i < a.size(), hb = i < b.size();
+        if (!ha && !hb) continue;
+        if (!hb) {   // 사라지는 획: 점점 옅어진다
+            VecStroke s = a[i];
+            s.color.setAlphaF(std::clamp(s.color.alphaF() * (1.0 - t), 0.0, 1.0));
+            if (s.color.alpha() > 2) out.push_back(s);
+            continue;
+        }
+        if (!ha) {   // 새로 생기는 획: 점점 진해진다
+            VecStroke s = b[i];
+            s.color.setAlphaF(std::clamp(s.color.alphaF() * t, 0.0, 1.0));
+            if (s.color.alpha() > 2) out.push_back(s);
+            continue;
+        }
+        const VecStroke& A = a[i];
+        const VecStroke& B = b[i];
+        const int pn = int(std::max<qsizetype>(2, std::max(A.pts.size(), B.pts.size())));
+        const QVector<QPointF> pa = resampleStroke(A.pts, pn), pb = resampleStroke(B.pts, pn);
+        VecStroke s = A;
+        s.pts.clear();
+        s.pressure.clear();
+        for (int k = 0; k < pn; ++k) {
+            s.pts.push_back(pa[k] + (pb[k] - pa[k]) * t);
+            s.pressure.push_back(1.0f);
+        }
+        s.width = A.width + (B.width - A.width) * t;
+        s.color = QColor::fromRgbF(A.color.redF() + (B.color.redF() - A.color.redF()) * t,
+                                   A.color.greenF() + (B.color.greenF() - A.color.greenF()) * t,
+                                   A.color.blueF() + (B.color.blueF() - A.color.blueF()) * t,
+                                   A.color.alphaF() + (B.color.alphaF() - A.color.alphaF()) * t);
+        out.push_back(s);
+    }
+    return out;
+}
+
+// ---------------- 자동 중간 그림 ----------------
+double Document::easeValue(double t, int ease) {
+    t = std::clamp(t, 0.0, 1.0);
+    switch (ease) {
+    case 1: return t * t * t;                                  // 느리게 시작
+    case 2: return 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);    // 느리게 끝
+    case 3: return t * t * (3.0 - 2.0 * t);                    // 느리게 시작·끝
+    default: return t;
+    }
+}
+
+int Document::makeInbetweens(int layer, int a, int b, int mode, int ease) {
+    if (layer < 0 || layer >= layers_.size()) return 0;
+    if (layers_[layer].locked) return 0;
+    a = std::clamp(a, 0, frameCount_ - 1);
+    b = std::clamp(b, 0, frameCount_ - 1);
+    if (b - a < 2) return 0;                      // 사이에 채울 자리가 없다
+    const int ka = keyIndexAt(layer, a), kb = keyIndexAt(layer, b);
+    if (ka != a || kb != b) return 0;             // 양 끝이 키여야 한다
+
+    const bool useVector = layers_[layer].vector && layers_[layer].vstrokes.contains(a) && layers_[layer].vstrokes.contains(b) &&
+                           (mode == 0 || mode == 1);
+    const QImage imgA = layers_[layer].frames[a];
+    const QImage imgB = layers_[layer].frames[b];
+    int made = 0;
+    for (int f = a + 1; f < b; ++f) {
+        const double raw = double(f - a) / double(b - a);
+        const double t = easeValue(raw, ease);
+        if (useVector) {
+            const QVector<VecStroke> s = interpolateStrokes(layers_[layer].vstrokes[a], layers_[layer].vstrokes[b], t);
+            layers_[layer].vstrokes[f] = s;
+            layers_[layer].frames[f] = renderVectorFrame(layer, f);
+        } else if (mode == 2) {
+            layers_[layer].frames[f] = Effects::crossfade(imgA, imgB, t);
+        } else {
+            layers_[layer].frames[f] = Effects::morph(imgA, imgB, t);
+        }
+        ++made;
+    }
+    undo_->clear();
+    setModified(true);
+    notifyStructure();
+    return made;
 }
 
 // ---------------- 퍼펫 ----------------
@@ -795,8 +1200,32 @@ QPolygonF Document::cameraFrame(int frame) const {
 }
 
 // ---------------- 라이브러리 ----------------
+void Document::setLibraryCategory(int i, const QString& cat) {
+    while (libCats_.size() < libNames_.size()) libCats_ << QString();
+    if (i < 0 || i >= libCats_.size()) return;
+    libCats_[i] = cat.trimmed();
+    setModified(true);
+    emit libraryChanged();
+}
+
+void Document::setLibraryName(int i, const QString& name) {
+    if (i < 0 || i >= libNames_.size() || name.trimmed().isEmpty()) return;
+    libNames_[i] = name.trimmed();
+    setModified(true);
+    emit libraryChanged();
+}
+
+QStringList Document::libraryCategories() const {
+    QStringList out;
+    for (const QString& s : libCats_)
+        if (!s.isEmpty() && !out.contains(s)) out << s;
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
 int Document::addToLibrary(const QString& name, const QImage& img) {
     libNames_.push_back(name);
+    libCats_.push_back(QString());
     libImages_.push_back(img);
     setModified(true);
     emit libraryChanged();
@@ -804,6 +1233,7 @@ int Document::addToLibrary(const QString& name, const QImage& img) {
 }
 
 void Document::removeFromLibrary(int i) {
+    if (i >= 0 && i < libCats_.size()) libCats_.remove(i);
     if (i < 0 || i >= libNames_.size()) return;
     libNames_.removeAt(i);
     libImages_.remove(i);
@@ -907,6 +1337,22 @@ QVariantMap layerExtSave(const Layer& l) {
     for (auto it = l.imageMarks.cbegin(); it != l.imageMarks.cend(); ++it) marks[QString::number(it.key())] = it.value();
     m["names"] = names;
     m["marks"] = marks;
+    if (l.vector) {
+        m["vector"] = true;
+        QVariantList vs;
+        for (auto it = l.vstrokes.cbegin(); it != l.vstrokes.cend(); ++it) {
+            QVariantList strokes;
+            for (const VecStroke& s : it.value()) {
+                QVariantList pts;
+                for (int i = 0; i < s.pts.size(); ++i) pts << s.pts[i].x() << s.pts[i].y() << double(s.pressure.value(i, 1.0f));
+                strokes << QVariant(QVariantMap{{"pts", pts}, {"color", s.color.name(QColor::HexArgb)}, {"w", s.width},
+                                                {"eraser", s.eraser}, {"closed", s.closed}, {"filled", s.filled},
+                                                {"fill", s.fill.name(QColor::HexArgb)}, {"visible", s.visible}});
+            }
+            vs << QVariant(QVariantMap{{"frame", it.key()}, {"strokes", strokes}});
+        }
+        m["vstrokes"] = vs;
+    }
     if (l.puppet) {
         m["puppet"] = true;
         m["pid"] = l.puppetId;
@@ -934,6 +1380,32 @@ void layerExtLoad(Layer& l, const QVariantMap& m) {
     const QVariantMap names = m.value("names").toMap(), marks = m.value("marks").toMap();
     for (auto it = names.cbegin(); it != names.cend(); ++it) l.instanceNames[it.key().toInt()] = it.value().toString();
     for (auto it = marks.cbegin(); it != marks.cend(); ++it) l.imageMarks[it.key().toInt()] = it.value().toInt();
+    l.vector = m.value("vector", false).toBool();
+    l.vstrokes.clear();
+    if (l.vector) {
+        for (const QVariant& fv : m.value("vstrokes").toList()) {
+            const QVariantMap fm = fv.toMap();
+            QVector<VecStroke> list;
+            for (const QVariant& sv : fm.value("strokes").toList()) {
+                const QVariantMap sm = sv.toMap();
+                VecStroke s;
+                const QVariantList pts = sm.value("pts").toList();
+                for (int i = 0; i + 2 < pts.size(); i += 3) {
+                    s.pts.push_back(QPointF(pts[i].toDouble(), pts[i + 1].toDouble()));
+                    s.pressure.push_back(pts[i + 2].toFloat());
+                }
+                s.color = QColor(sm.value("color", "#ff000000").toString());
+                s.width = sm.value("w", 6).toDouble();
+                s.eraser = sm.value("eraser").toBool();
+                s.closed = sm.value("closed").toBool();
+                s.filled = sm.value("filled").toBool();
+                s.fill = QColor(sm.value("fill", "#00000000").toString());
+                s.visible = sm.value("visible", true).toBool();
+                if (!s.pts.isEmpty()) list.push_back(s);
+            }
+            if (!list.isEmpty()) l.vstrokes[fm.value("frame").toInt()] = list;
+        }
+    }
     l.puppet = m.value("puppet", false).toBool();
     l.puppetId = m.value("pid", 0).toInt();
     l.puppetParent = m.value("ppar", 0).toInt();
@@ -975,6 +1447,12 @@ QVariantMap Document::extraSave() const {
                                    {"hard", s.brush.hardness}, {"press", s.brush.pressure}, {"preset", s.brush.preset},
                                    {"color", s.color.name(QColor::HexArgb)}, {"eraser", s.eraser}, {"pts", pts}});
     }
+    QVariantList fp;
+    for (const Folder& fo : folders_) fp << fo.parent;
+    m["folderParents"] = fp;
+    QVariantList lc;
+    for (const QString& s : libCats_) lc << s;
+    m["libraryCategories"] = lc;
     m["strokes"] = sl;
     m["renderCam"] = QVariantMap{{"on", renderCam_.on}, {"w", renderCam_.size.width()}, {"h", renderCam_.size.height()}, {"fit", renderCam_.fit}};
     m["masterVolume"] = masterVolume_;
@@ -1015,6 +1493,19 @@ void Document::extraLoad(const QVariantMap& m) {
         renderCam_.on = rc.value("on", false).toBool();
         renderCam_.size = QSize(std::clamp(rc.value("w", 1920).toInt(), 16, 16384), std::clamp(rc.value("h", 1080).toInt(), 16, 16384));
         renderCam_.fit = std::clamp(rc.value("fit", 0).toInt(), 0, 2);
+    }
+    {
+        libCats_.clear();
+        for (const QVariant& v : m.value("libraryCategories").toList()) libCats_ << v.toString();
+        while (libCats_.size() < libNames_.size()) libCats_ << QString();
+        libCats_.resize(libNames_.size());
+    }
+    {
+        const QVariantList fp = m.value("folderParents").toList();
+        for (int i = 0; i < folders_.size() && i < fp.size(); ++i) {
+            const int par = fp[i].toInt();
+            folders_[i].parent = (par >= -1 && par < folders_.size() && par != i) ? par : -1;
+        }
     }
     strokes_.clear();
     for (const QVariant& v : m.value("strokes").toList()) {
@@ -1206,6 +1697,8 @@ bool Document::load(const QString& path) {
     cameraEnabled_ = camOn;
     cameraKeys_ = std::move(camKeys);
     libNames_ = std::move(libNames);
+    libCats_.clear();
+    libCats_.resize(libNames_.size());
     libImages_ = std::move(libImages);
     audioTracks_.clear();
     if (!audio.isEmpty()) {

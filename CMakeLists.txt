@@ -26,6 +26,9 @@ add_library(tvpcore STATIC
     src/Blend.h src/Blend.cpp
     src/VideoExport.h src/VideoExport.cpp
     src/Print.h src/Print.cpp
+    src/Psd.h src/Psd.cpp
+    src/Plugins.h src/Plugins.cpp
+    src/Collab.h src/Collab.cpp
 )
 target_include_directories(tvpcore PUBLIC src)
 target_link_libraries(tvpcore PUBLIC Qt6::Widgets)
@@ -43,6 +46,7 @@ set(UI_SOURCES
     src/LayerMenu.h src/LayerMenu.cpp
     src/Shortcuts.h src/Shortcuts.cpp
     src/Privacy.h src/Privacy.cpp
+    src/CurvesDialog.h src/CurvesDialog.cpp
 )
 
 # 로고 (resources/ony.png, resources/ony.ico) — 있으면 자동으로 포함
