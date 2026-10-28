@@ -15,8 +15,8 @@ struct BrushParams {
     // ---- 필압 조절 (pressure 가 켜져 있을 때만 쓴다) ----
     bool prSize = true;       // 필압이 굵기에 작용
     bool prOpacity = true;    // 필압이 진하기에 작용
-    int prMinSize = 6;        // 가장 약하게 눌렀을 때의 굵기 (전체의 %)
-    int prMinOpacity = 0;     // 가장 약하게 눌렀을 때의 진하기 (전체의 %)
+    int prMinSize = 14;       // 가장 약하게 눌렀을 때의 굵기 (전체의 %)
+    int prMinOpacity = 12;    // 가장 약하게 눌렀을 때의 진하기 (전체의 %)
     int prCurve = -35;        // 감도 -100 ~ +100. 음수 = 살짝만 눌러도 진하게, 양수 = 꾹 눌러야 진하게
     int preset = 0;      // brushPreset() 인덱스
     bool tilt = false;        // 펜 기울기를 쓰면 붓이 납작해지고 기운 쪽으로 돈다

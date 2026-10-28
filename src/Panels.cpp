@@ -489,9 +489,9 @@ ToolPanel::ToolPanel(QWidget* parent) : QWidget(parent) {
         row->addWidget(v);
         pl->addLayout(row);
     };
-    prRow(QStringLiteral("최소 굵기"), 0, 100, 6, prMinSize_, prMinSizeV_, QStringLiteral("%"),
+    prRow(QStringLiteral("최소 굵기"), 0, 100, 14, prMinSize_, prMinSizeV_, QStringLiteral("%"),
           QStringLiteral("가장 약하게 눌렀을 때의 굵기입니다. 0% 면 선이 점으로 사라지고, 100% 면 필압이 굵기에 영향을 주지 않습니다."));
-    prRow(QStringLiteral("최소 진하기"), 0, 100, 0, prMinOp_, prMinOpV_, QStringLiteral("%"),
+    prRow(QStringLiteral("최소 진하기"), 0, 100, 12, prMinOp_, prMinOpV_, QStringLiteral("%"),
           QStringLiteral("가장 약하게 눌렀을 때의 진하기입니다."));
     prRow(QStringLiteral("감도"), -100, 100, -35, prCurve_, prCurveV_, QString(),
           QStringLiteral("음수로 갈수록 살짝만 눌러도 굵고 진하게 나오고, 양수로 갈수록 꾹 눌러야 나옵니다. 0 이 그대로입니다."));
@@ -505,12 +505,19 @@ ToolPanel::ToolPanel(QWidget* parent) : QWidget(parent) {
     // 지난번에 맞춰 둔 값을 되살린다 (프리셋을 바꿔도 이 설정은 그대로 둔다)
     {
         QSettings st("Ony", "Ony");
+        // 한때 최소 굵기·진하기 기본값이 너무 낮아서 약하게 그으면 선이 끊겨 보였다.
+        // 그때 값이 저장돼 있으면 한 번만 지금 기본값으로 되돌린다.
+        if (st.value("pressure/ver", 1).toInt() < 2) {
+            st.remove("pressure/minSize");
+            st.remove("pressure/minOpacity");
+            st.setValue("pressure/ver", 2);
+        }
         QSignalBlocker d1(prSize_), d2(prOpacity_), d3(prMinSize_), d4(prMinSizeV_), d5(prMinOp_), d6(prMinOpV_),
             d7(prCurve_), d8(prCurveV_);
         prSize_->setChecked(st.value("pressure/size", true).toBool());
         prOpacity_->setChecked(st.value("pressure/opacity", true).toBool());
-        const int ms = std::clamp(st.value("pressure/minSize", 6).toInt(), 0, 100);
-        const int mo = std::clamp(st.value("pressure/minOpacity", 0).toInt(), 0, 100);
+        const int ms = std::clamp(st.value("pressure/minSize", 14).toInt(), 0, 100);
+        const int mo = std::clamp(st.value("pressure/minOpacity", 12).toInt(), 0, 100);
         const int cv = std::clamp(st.value("pressure/curve", -35).toInt(), -100, 100);
         prMinSize_->setValue(ms);
         prMinSizeV_->setValue(ms);
@@ -694,6 +701,7 @@ void ToolPanel::emitParams() {
         st.setValue("pressure/minSize", p.prMinSize);
         st.setValue("pressure/minOpacity", p.prMinOpacity);
         st.setValue("pressure/curve", p.prCurve);
+        st.setValue("pressure/ver", 2);
     }
     emit paramsChanged(p);
 }

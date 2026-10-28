@@ -598,6 +598,58 @@ static void testPressureSettings() {
 }
 
 // 애니메이션 브러시: 그림 여러 장을 묶어 찍을 때마다 다음 장이 나온다
+// 약하게 눌러도 획이 끊기지 않는다.
+// 예전에는 점 사이 간격을 '원래 굵기'로만 잡아서, 살짝 누르면 점이 떨어져 실밥처럼 보였다.
+static void testLightStrokeContinuity() {
+    auto strokeGaps = [](double press, int size, int minSize, int* paintedOut = nullptr) {
+        BrushParams b;
+        b.pressure = true;
+        b.prSize = true;
+        b.prOpacity = true;
+        b.prMinSize = minSize;
+        b.prMinOpacity = 12;
+        b.prCurve = -35;
+        b.size = size;
+        b.opacity = 100;
+        b.hardness = 90;
+        QImage im(240, 40, QImage::Format_ARGB32_Premultiplied);
+        im.fill(Qt::transparent);
+        QRandomGenerator rng(99u);
+        BrushDabCache cache;
+        double carry = 0;
+        brushStampAt(im, b, Qt::black, QPointF(10, 20), press, rng, cache);
+        brushStampAlong(im, b, Qt::black, QPointF(10, 20), QPointF(230, 20), press, press, carry, rng, cache);
+        int gaps = 0, painted = 0;
+        for (int x = 12; x <= 228; ++x) {
+            bool any = false;
+            for (int y = 0; y < im.height(); ++y)
+                if (qAlpha(im.pixel(x, y)) > 0) { any = true; break; }
+            if (any) ++painted; else ++gaps;
+        }
+        if (paintedOut) *paintedOut = painted;
+        return gaps;
+    };
+
+    // 가는 브러시(기본 펜 굵기 6)에서 제일 잘 드러난다
+    for (double press : {1.0, 0.30, 0.15, 0.08, 0.03, 0.01}) {
+        int painted = 0;
+        const int gaps = strokeGaps(press, 6, 14, &painted);
+        CHECK(gaps == 0);
+        CHECK(painted > 200);
+    }
+    // 굵은 브러시도 마찬가지
+    for (double press : {0.20, 0.05}) CHECK(strokeGaps(press, 24, 14) == 0);
+    // 최소 굵기를 아주 낮게 둬도 끊기지 않는다
+    CHECK(strokeGaps(0.05, 6, 2) == 0);
+    CHECK(strokeGaps(0.02, 24, 2) == 0);
+
+    // 최소 굵기를 0 으로 두고 가장 약하게 눌러도, 가장 가는 선(2px 심지)은 이어져 나온다.
+    // 예전에는 여기서 점이 너무 작아져 투명하게 사라졌다.
+    int painted0 = 0;
+    CHECK(strokeGaps(0.0, 6, 0, &painted0) == 0);
+    CHECK(painted0 > 200);
+}
+
 static void testAnimBrush() {
     clearCustomBrushes();
     CHECK(customBrushCount() == 0);
@@ -3006,6 +3058,7 @@ int main(int argc, char** argv) {
     testPuppet();
     testTimelineZoom();
     testPressureSettings();
+    testLightStrokeContinuity();
     testAnimBrush();
     testTiltAndCustomBrush(w);
     testCutDashBrush();

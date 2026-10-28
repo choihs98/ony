@@ -178,7 +178,9 @@ void brushStampAt(QImage& buf, const BrushParams& params, const QColor& color, c
     double sizeMul = 1.0, opMul = 1.0;
     pressureFactors(params, pressure, &sizeMul, &opMul);
     double r = params.size / 2.0 * sizeMul;
-    r = std::max(0.5, r);
+    // 지름 1px 짜리 점은 부드러운 가장자리 때문에 거의 투명해져 아예 안 보인다.
+    // 가장 가는 선도 1px 심지는 남도록 지름 2px 를 바닥으로 둔다.
+    r = std::max(1.0, r);
     const double sc = std::clamp(opMul, 0.0, 1.0);
     QPainter p(&buf);
     p.setRenderHint(QPainter::SmoothPixmapTransform, !pr.aliased);
@@ -231,13 +233,20 @@ void brushStampAlong(QImage& buf, const BrushParams& params, const QColor& color
     const double dx = b.x() - a.x(), dy = b.y() - a.y();
     const double dist = std::hypot(dx, dy);
     if (dist < 1e-6) return;
-    const double step = std::max(1.0, params.size * pr.spacing / 100.0);
     cache.dir = std::atan2(dy, dx) * 180.0 / M_PI;
     double t = carry;
+    int guard = 0;
     while (t <= dist) {
         const double u = t / dist;
-        brushStampAt(buf, params, color, QPointF(a.x() + dx * u, a.y() + dy * u), pa + (pb - pa) * u, rng, cache);
-        t += step;
+        const double press = pa + (pb - pa) * u;
+        brushStampAt(buf, params, color, QPointF(a.x() + dx * u, a.y() + dy * u), press, rng, cache);
+        // 찍는 간격은 '지금 이 세기에서의 굵기'를 따라간다.
+        // 예전에는 늘 원래 굵기를 기준으로 띄워서, 약하게 누르면 점이 떨어져 실밥처럼 끊겼다.
+        double sizeMul = 1.0;
+        pressureFactors(params, press, &sizeMul, nullptr);
+        const double effSize = std::max(1.0, params.size * sizeMul);
+        t += std::max(0.75, effSize * pr.spacing / 100.0);
+        if (++guard > 20000) break;   // 터무니없이 긴 구간에서 멈추지 않도록
     }
     carry = t - dist;
 }
