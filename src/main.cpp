@@ -45,7 +45,8 @@ QPixmap makeSplash() {
 #ifdef ONY_HAS_LOGO
     const QPixmap logo(":/ony_logo.png");
     if (!logo.isNull()) {
-        const QPixmap s = logo.scaledToWidth(400, Qt::SmoothTransformation);
+        // 로고 비율이 가로형/정방형 어느 쪽이든 스플래시 안에 들어오도록 가로·세로 둘 다 제한
+        const QPixmap s = logo.scaled(400, 300, Qt::KeepAspectRatio, Qt::SmoothTransformation);
         p.drawPixmap((pm.width() - s.width()) / 2, (pm.height() - s.height()) / 2 - 14, s);
     }
 #else

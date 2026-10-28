@@ -3401,7 +3401,8 @@ void MainWindow::buildMenus() {
         box.setWindowTitle("정보");
         box.setText(QString("ONY — 키 이미지(원화) 중심의 2D 프레임 애니메이션 도구 (개발 중)\n빌드: %1 %2").arg(__DATE__, __TIME__));
 #ifdef ONY_HAS_LOGO
-        box.setIconPixmap(QPixmap(":/ony_logo.png").scaledToWidth(320, Qt::SmoothTransformation));
+        // 로고 비율이 가로형/정방형 어느 쪽이든 정보 창 안에서 과하게 커지지 않도록 가로·세로 둘 다 제한
+        box.setIconPixmap(QPixmap(":/ony_logo.png").scaled(240, 240, Qt::KeepAspectRatio, Qt::SmoothTransformation));
 #endif
         box.exec();
     });
