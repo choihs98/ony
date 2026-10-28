@@ -43,6 +43,11 @@ public:
     bool lightTable() const { return lightTable_; }
     void setCameraView(bool on);
     qreal zoom() const { return zoom_; }
+    // 보기 각도: 종이를 돌려 가며 그리도록 화면만 돌린다 (그림 자체는 그대로)
+    qreal viewAngle() const { return viewAngle_; }
+    void setViewAngle(qreal deg);
+    void rotateView(qreal deltaDeg) { setViewAngle(viewAngle_ + deltaDeg); }
+    void resetViewAngle() { setViewAngle(0); }
     void setBackdrop(const QColor& c) { backdrop_ = c; update(); }
 
     // 참조 이미지: 캔버스 뒤(또는 위)에 비쳐 보이게 깔아 두는 그림. 그림에는 섞이지 않는다.
@@ -164,6 +169,7 @@ signals:
     void message(const QString& text);
     void strokeFinished();
     void viewChanged();
+    void viewAngleChanged(qreal deg);
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -235,6 +241,8 @@ private:
     LightTableParams ltParams_;
     QRectF lastView_;
     qreal zoom_ = 1.0;
+    qreal viewAngle_ = 0;          // 도. 0 이면 예전과 똑같은 길로 그린다.
+    QTransform viewRotation(bool inverse = false) const;   // 화면 한가운데를 축으로 도는 변환
     QPointF pan_{0, 0};
     bool fitPending_ = true;
     bool spaceDown_ = false;

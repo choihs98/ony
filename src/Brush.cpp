@@ -43,14 +43,17 @@ const BrushPreset kPresets[] = {
 };
 constexpr int kCount = sizeof(kPresets) / sizeof(kPresets[0]);
 
-QVector<QPair<QString, QImage>> g_custom;
+QVector<QPair<QString, QVector<QImage>>> g_custom;
 QImage g_customGrain;
 
-QImage makeDab(const BrushPreset& pr, int d, int hardness, const QColor& c, int custom, double tiltAngle, double tiltAmount) {
+QImage makeDab(const BrushPreset& pr, int d, int hardness, const QColor& c, int custom, int customFrame,
+               double tiltAngle, double tiltAmount) {
     d = std::max(1, d);
-    if (custom >= 0 && custom < g_custom.size() && !g_custom[custom].second.isNull()) {
+    if (custom >= 0 && custom < g_custom.size() && !g_custom[custom].second.isEmpty()) {
         // 사용자 브러시: 그림의 알파를 모양으로 쓰고 현재 색으로 칠한다
-        const QImage src = g_custom[custom].second;
+        const auto& frames = g_custom[custom].second;
+        const QImage src = frames[std::clamp(customFrame, 0, int(frames.size()) - 1)];
+        if (src.isNull()) return QImage(1, 1, QImage::Format_ARGB32_Premultiplied);
         const int side = int(std::ceil(d * 1.5)) + 4;
         QImage img(side, side, QImage::Format_ARGB32_Premultiplied);
         img.fill(Qt::transparent);
@@ -120,18 +123,20 @@ QImage makeDab(const BrushPreset& pr, int d, int hardness, const QColor& c, int 
     return img;
 }
 
-const QImage& dabFor(BrushDabCache& cache, int preset, int d, int hardness, const QColor& c, int custom, double ta, double tm) {
+const QImage& dabFor(BrushDabCache& cache, int preset, int d, int hardness, const QColor& c, int custom,
+                     int customFrame, double ta, double tm) {
     const int tkey = int(tm * 20) * 400 + int(ta / 10);
     if (cache.preset == preset && cache.d == d && cache.hardness == hardness && cache.color == c.rgba() &&
-        cache.custom == custom && cache.tiltKey == tkey && !cache.img.isNull())
+        cache.custom == custom && cache.customFrame == customFrame && cache.tiltKey == tkey && !cache.img.isNull())
         return cache.img;
     cache.preset = preset;
     cache.d = d;
     cache.hardness = hardness;
     cache.color = c.rgba();
     cache.custom = custom;
+    cache.customFrame = customFrame;
     cache.tiltKey = tkey;
-    cache.img = makeDab(kPresets[preset], d, hardness, c, custom, ta, tm);
+    cache.img = makeDab(kPresets[preset], d, hardness, c, custom, customFrame, ta, tm);
     return cache.img;
 }
 } // namespace
@@ -139,14 +144,42 @@ const QImage& dabFor(BrushDabCache& cache, int preset, int d, int hardness, cons
 int brushPresetCount() { return kCount; }
 const BrushPreset& brushPreset(int i) { return kPresets[std::clamp(i, 0, kCount - 1)]; }
 
+// 감도: curve 가 0 이면 그대로, 음수면 살짝만 눌러도 많이 나가고, 양수면 꾹 눌러야 나간다.
+double pressureCurve(int curve, double pressure) {
+    const double x = std::clamp(pressure, 0.0, 1.0);
+    const int c = std::clamp(curve, -100, 100);
+    if (c == 0) return x;
+    // -100 → 0.4 제곱(쉽게), +100 → 2.5 제곱(힘들게)
+    const double g = c < 0 ? 1.0 + (c / 100.0) * 0.6 : 1.0 + (c / 100.0) * 1.5;
+    return std::pow(x, g);
+}
+
+void pressureFactors(const BrushParams& p, double pressure, double* sizeMul, double* opacityMul) {
+    double sm = 1.0, om = 1.0;
+    if (p.pressure) {
+        const double x = pressureCurve(p.prCurve, pressure);
+        if (p.prSize) {
+            const double lo = std::clamp(p.prMinSize, 0, 100) / 100.0;
+            sm = lo + (1.0 - lo) * x;
+        }
+        if (p.prOpacity) {
+            const double lo = std::clamp(p.prMinOpacity, 0, 100) / 100.0;
+            om = lo + (1.0 - lo) * x;
+        }
+    }
+    if (sizeMul) *sizeMul = sm;
+    if (opacityMul) *opacityMul = om;
+}
+
 void brushStampAt(QImage& buf, const BrushParams& params, const QColor& color, const QPointF& pos, double pressure,
                   QRandomGenerator& rng, BrushDabCache& cache) {
     const int pi = std::clamp(params.preset, 0, kCount - 1);
     const BrushPreset& pr = kPresets[pi];
-    const bool usePressure = params.pressure;
-    double r = params.size / 2.0 * (usePressure ? (0.15 + 0.85 * pressure) : 1.0);
+    double sizeMul = 1.0, opMul = 1.0;
+    pressureFactors(params, pressure, &sizeMul, &opMul);
+    double r = params.size / 2.0 * sizeMul;
     r = std::max(0.5, r);
-    const double sc = usePressure ? std::clamp(pressure, 0.05, 1.0) : 1.0;
+    const double sc = std::clamp(opMul, 0.0, 1.0);
     QPainter p(&buf);
     p.setRenderHint(QPainter::SmoothPixmapTransform, !pr.aliased);
 
@@ -173,9 +206,15 @@ void brushStampAt(QImage& buf, const BrushParams& params, const QColor& color, c
         const double rr = sr * std::sqrt(rng.generateDouble());
         at += QPointF(std::cos(a) * rr, std::sin(a) * rr);
     }
+    // 애니메이션 브러시면 찍을 때마다 다음 장을 쓴다
+    int frameIdx = 0;
+    const int nFrames = customBrushFrameCount(params.customBrush);
+    if (nFrames > 1)
+        frameIdx = params.animMode == 1 ? int(rng.bounded(nFrames)) : (cache.animStep % nFrames);
     const QImage& img = dabFor(cache, pi, int(std::ceil(r * 2.0)), pr.aliased ? 100 : params.hardness,
-                               pr.eraser ? QColor(Qt::black) : color, params.customBrush,
+                               pr.eraser ? QColor(Qt::black) : color, params.customBrush, frameIdx,
                                params.tilt ? params.tiltAngle : 0.0, params.tilt ? params.tiltAmount : 0.0);
+    if (nFrames > 1) ++cache.animStep;
     p.setOpacity(sc);
     if (pr.follow) {
         p.translate(at);
@@ -272,13 +311,34 @@ QImage brushPreview(const BrushParams& params, const QColor& color, QSize size) 
 // ---------------- 사용자 브러시 · 질감 ----------------
 int customBrushCount() { return g_custom.size(); }
 QString customBrushName(int i) { return (i >= 0 && i < g_custom.size()) ? g_custom[i].first : QString(); }
-QImage customBrushImage(int i) { return (i >= 0 && i < g_custom.size()) ? g_custom[i].second : QImage(); }
+
+int customBrushFrameCount(int i) { return (i >= 0 && i < g_custom.size()) ? int(g_custom[i].second.size()) : 0; }
+
+QImage customBrushFrame(int i, int frame) {
+    if (i < 0 || i >= g_custom.size() || g_custom[i].second.isEmpty()) return QImage();
+    return g_custom[i].second[std::clamp(frame, 0, int(g_custom[i].second.size()) - 1)];
+}
+
+QImage customBrushImage(int i) { return customBrushFrame(i, 0); }
+
+static QImage fitBrushImage(const QImage& img) {
+    QImage src = img.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    if (src.width() > 512 || src.height() > 512) src = src.scaled(512, 512, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    return src;
+}
 
 int addCustomBrush(const QString& name, const QImage& img) {
     if (img.isNull()) return -1;
-    QImage src = img.convertToFormat(QImage::Format_ARGB32_Premultiplied);
-    if (src.width() > 512 || src.height() > 512) src = src.scaled(512, 512, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    g_custom.push_back({name.isEmpty() ? QStringLiteral("사용자 브러시") : name, src});
+    g_custom.push_back({name.isEmpty() ? QStringLiteral("사용자 브러시") : name, QVector<QImage>{fitBrushImage(img)}});
+    return g_custom.size() - 1;
+}
+
+int addAnimBrush(const QString& name, const QVector<QImage>& frames) {
+    QVector<QImage> keep;
+    for (const QImage& f : frames)
+        if (!f.isNull()) keep.push_back(fitBrushImage(f));
+    if (keep.isEmpty()) return -1;
+    g_custom.push_back({name.isEmpty() ? QStringLiteral("애니메이션 브러시") : name, keep});
     return g_custom.size() - 1;
 }
 

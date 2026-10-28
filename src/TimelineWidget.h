@@ -7,7 +7,7 @@
 
 class Document;
 
-// TVPaint 식 타임라인: 왼쪽 레이어 머리글(눈/잠금/썸네일/이름) + 프레임 칸(키 이미지 썸네일)
+// 타임라인: 왼쪽 레이어 머리글(눈/잠금/썸네일/이름) + 프레임 칸(키 이미지 썸네일)
 class TimelineWidget : public QWidget {
     Q_OBJECT
 public:

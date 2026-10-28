@@ -2,7 +2,7 @@
 #include <QImage>
 #include <QString>
 
-// 레이어 블렌딩 모드 (TVPaint 매뉴얼의 "Blending Modes list" 기준 28종)
+// 레이어 블렌딩 모드 (28종)
 namespace Blend {
 enum Mode {
     Color = 0, Behind, Erase, Shade, Light, Colorize, Tint, Saturate, Value, Add, Sub, Multiply, Screen, Replace,

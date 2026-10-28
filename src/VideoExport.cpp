@@ -104,7 +104,12 @@ QString run(Document* doc, const QString& outPath, const VideoOptions& o, const 
             if (o.scalePercent != 100) save = img.scaled(img.size() * o.scalePercent / 100, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
             const QString ext = o.format == "tiff" ? "tif" : o.format;
             const QString path = QDir(outPath).filePath(QString("%1_%2.%3").arg(o.baseName).arg(f - from + 1, 4, 10, QChar('0')).arg(ext));
-            const bool ok = o.format == "jpg" ? save.convertToFormat(QImage::Format_RGB32).save(path, "JPG", 95) : save.save(path);
+            doc->tagColorSpace(save);   // 프로젝트 색 공간을 붙인다
+            const bool ok = o.format == "jpg" ? [&] {
+                QImage j = save.convertToFormat(QImage::Format_RGB32);
+                doc->tagColorSpace(j);
+                return j.save(path, "JPG", 95);
+            }() : save.save(path);
             if (!ok) return QString("프레임 %1 을 저장하지 못했습니다.").arg(f + 1);
             if (progress && !progress(f - from + 1, total)) return QStringLiteral("취소됨");
         }

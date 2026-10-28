@@ -147,19 +147,18 @@ QString ScriptEngine::help() {
         "  while 조건 ... end\n"
         "  for i = 1 to 10 [step 2] ... end      (안에서 $i 로 씀)\n"
         "  repeat A B 명령                        (한 줄 반복, {i} 가 값으로 바뀜)\n"
-        "  do ... until 조건                      (George 방식. 한 번은 꼭 돈다)\n"
+        "  do ... until 조건                      (한 번은 꼭 돌고, 조건이 참이 되면 멈춘다)\n"
         "  식에 쓸 수 있는 것: + - * / % ( ) < > <= >= == != and or not\n"
         "    abs min max int floor ceil round sign sqrt pow(a,b) exp log\n"
         "    sin cos tan asin acos atan(a[,b]) rnd() rnd(n) rnd(a,b) pi\n"
-        "■ George 호환\n"
-        "  tv_ 로 시작하는 이름을 알아듣습니다 (대소문자 가리지 않음, \"따옴표\" 는 벗겨 줍니다)\n"
-        "    tv_LayerCreate tv_LayerSelect tv_LayerKill tv_LayerRename tv_LayerDisplay\n"
-        "    tv_LayerDensity tv_LayerBlendingMode tv_LayerLock tv_LayerMove tv_DuplicateLayer\n"
-        "    tv_LayerMerge tv_ClearLayer tv_LayerImage tv_ExposureAdd tv_FrameRate\n"
-        "    tv_Rect tv_Line tv_Ellipse tv_SaveProject tv_SaveImage tv_WriteText tv_Version\n"
+        "■ 긴 이름 (ony_…)\n"
+        "  짧은 명령 대신 풀어 쓴 이름도 알아듣습니다 (대소문자 가리지 않음, \"따옴표\" 는 벗겨 줍니다)\n"
+        "    ony_LayerCreate ony_LayerSelect ony_LayerDelete ony_LayerRename ony_LayerVisible\n"
+        "    ony_LayerOpacity ony_LayerBlend ony_LayerLock ony_LayerMove ony_LayerDuplicate\n"
+        "    ony_LayerMerge ony_LayerClear ony_GotoFrame ony_Exposure ony_FrameRate\n"
+        "    ony_Rect ony_Line ony_Ellipse ony_SaveProject ony_SaveImage ony_Print ony_Version\n"
         "  바로 앞 명령의 결과는 $result 에 담깁니다\n"
-        "  콘솔의 [열기]·[저장] 으로 .grg / .txt 스크립트 파일을 주고받을 수 있습니다\n"
-        "  ONY 는 TVPaint 와 같은 프로그램이 아니라서, 위에 없는 tv_ 명령은 알아듣지 못합니다\n"
+        "  콘솔의 [열기]·[저장] 으로 .onys / .txt 스크립트 파일을 주고받을 수 있습니다\n"
         "■ 프로젝트 · 레이어\n"
         "  frame N | frames N | fps N\n"
         "  layer.new 이름 | layer.select N | layer.delete | layer.rename 이름\n"
@@ -208,7 +207,7 @@ QString ScriptEngine::run(const QString& script) {
 int ScriptEngine::matchEnd(const QStringList& lines, int start, int to) const {
     int depth = 0;
     const QString head = lines[start].trimmed().section(QRegularExpression("\\s+"), 0, 0).toLower();
-    // George 의 do … until 은 end 가 아니라 until 로 닫는다
+    // do … until 블록은 end 가 아니라 until 로 닫는다
     if (head == "do") {
         for (int i = start; i < to; ++i) {
             const QString t = lines[i].trimmed().section(QRegularExpression("\\s+"), 0, 0).toLower();
@@ -318,7 +317,7 @@ QString ScriptEngine::runBlock(const QStringList& lines, int from, int to, int d
             continue;
         }
         if (head == "do") {
-            // do … until 조건  (George). 본문을 한 번 돌고 조건이 참이 될 때까지 되풀이한다.
+            // do … until 조건. 본문을 한 번 돌고 조건이 참이 될 때까지 되풀이한다.
             const int untilIdx = matchEnd(lines, i, to);
             if (untilIdx < 0) return log + QString("%1: do 에 맞는 until 이 없습니다\n").arg(i + 1);
             const QString cond = lines[untilIdx].trimmed().section(QRegularExpression("\\s+"), 1);
@@ -336,7 +335,7 @@ QString ScriptEngine::runBlock(const QStringList& lines, int from, int to, int d
         if (head == "else" || head == "end" || head == "until") continue;
 
         const QString r = runLine(line, depth);
-        // George 처럼 바로 앞 명령의 결과를 $result 로 쓸 수 있게 둔다
+        // 바로 앞 명령의 결과를 $result 로 쓸 수 있게 둔다
         svars_[QStringLiteral("result")] = r;
         bool okNum = false;
         const double rd = r.toDouble(&okNum);
@@ -463,7 +462,7 @@ struct Expr {
         if (word("int")) { sym("("); const double v = orExpr(); sym(")"); return std::floor(v); }
         if (word("sin")) { sym("("); const double v = orExpr(); sym(")"); return std::sin(v); }
         if (word("cos")) { sym("("); const double v = orExpr(); sym(")"); return std::cos(v); }
-        // George 호환 함수들
+        // 그 밖의 수학 함수들
         if (word("tan")) { sym("("); const double v = orExpr(); sym(")"); return std::tan(v); }
         if (word("asin")) { sym("("); const double v = orExpr(); sym(")"); return std::asin(std::clamp(v, -1.0, 1.0)); }
         if (word("acos")) { sym("("); const double v = orExpr(); sym(")"); return std::acos(std::clamp(v, -1.0, 1.0)); }
@@ -518,39 +517,34 @@ double ScriptEngine::eval(const QString& expr) const {
     return e.orExpr();
 }
 
-// George(tv_…) 이름을 ONY 명령으로 옮기는 표. 모르는 tv_ 명령은 호스트로 넘어간다.
-static const QHash<QString, QString>& georgeAliases() {
+// 긴 이름(ony_…) 을 짧은 ONY 명령으로 옮기는 표. 모르는 ony_ 이름은 호스트로 넘어간다.
+static const QHash<QString, QString>& longNameAliases() {
     static const QHash<QString, QString> m = {
-        {"tv_layercreate", "layer.new"},
-        {"tv_layerselect", "layer.select"},
-        {"tv_layercurrentid", "layer.select"},
-        {"tv_layerkill", "layer.delete"},
-        {"tv_layerrename", "layer.rename"},
-        {"tv_layerdisplay", "layer.visible"},
-        {"tv_layerdensity", "layer.opacity"},
-        {"tv_layeropacity", "layer.opacity"},
-        {"tv_layerblendingmode", "layer.blend"},
-        {"tv_layerlock", "layer.lock"},
-        {"tv_layermove", "layer.move"},
-        {"tv_duplicatelayer", "layer.duplicate"},
-        {"tv_layerduplicate", "layer.duplicate"},
-        {"tv_layermerge", "layer.mergedown"},
-        {"tv_clearlayer", "clear"},
-        {"tv_layerimage", "frame"},
-        {"tv_projectcurrentframe", "frame"},
-        {"tv_layerinsertimage", "key.clear"},
-        {"tv_exposureadd", "key.exposure"},
-        {"tv_exposureset", "key.exposure"},
-        {"tv_framerate", "fps"},
-        {"tv_rect", "rect"},
-        {"tv_line", "line"},
-        {"tv_ellipse", "ellipse"},
-        {"tv_saveproject", "save"},
-        {"tv_savedisplay", "export.png"},
-        {"tv_saveimage", "export.png"},
-        {"tv_writetext", "print"},
-        {"tv_warn", "print"},
-        {"tv_version", "version"},
+        {"ony_layercreate", "layer.new"},
+        {"ony_layerselect", "layer.select"},
+        {"ony_layercurrent", "layer.select"},
+        {"ony_layerdelete", "layer.delete"},
+        {"ony_layerrename", "layer.rename"},
+        {"ony_layervisible", "layer.visible"},
+        {"ony_layeropacity", "layer.opacity"},
+        {"ony_layerblend", "layer.blend"},
+        {"ony_layerlock", "layer.lock"},
+        {"ony_layermove", "layer.move"},
+        {"ony_layerduplicate", "layer.duplicate"},
+        {"ony_layermerge", "layer.mergedown"},
+        {"ony_layerclear", "clear"},
+        {"ony_gotoframe", "frame"},
+        {"ony_currentframe", "frame"},
+        {"ony_imageclear", "key.clear"},
+        {"ony_exposure", "key.exposure"},
+        {"ony_framerate", "fps"},
+        {"ony_rect", "rect"},
+        {"ony_line", "line"},
+        {"ony_ellipse", "ellipse"},
+        {"ony_saveproject", "save"},
+        {"ony_saveimage", "export.png"},
+        {"ony_print", "print"},
+        {"ony_version", "version"},
     };
     return m;
 }
@@ -558,11 +552,11 @@ static const QHash<QString, QString>& georgeAliases() {
 QString ScriptEngine::runLine(const QString& rawLine, int depth) {
     if (depth > 16) return QStringLiteral("너무 깊습니다");
     QString line = expand(rawLine);
-    {   // George 호환: tv_ 로 시작하는 이름을 바꾸고, "따옴표" 를 벗긴다
+    {   // 긴 이름(ony_…) 을 짧은 명령으로 바꾸고, "따옴표" 를 벗긴다
         const int sp = line.indexOf(QRegularExpression("\\s"));
         const QString head = (sp < 0 ? line : line.left(sp)).trimmed();
-        if (head.startsWith(QLatin1String("tv_"), Qt::CaseInsensitive)) {
-            const QString mapped = georgeAliases().value(head.toLower());
+        if (head.startsWith(QLatin1String("ony_"), Qt::CaseInsensitive)) {
+            const QString mapped = longNameAliases().value(head.toLower());
             if (!mapped.isEmpty()) {
                 QString tail = sp < 0 ? QString() : line.mid(sp);
                 tail.replace('"', ' ');
@@ -792,14 +786,14 @@ ScriptConsole::ScriptConsole(Document* doc, QWidget* parent) : QWidget(parent), 
     auto* help = new QPushButton(QStringLiteral("도움말"));
     auto* open = new QPushButton(QStringLiteral("열기"));
     auto* save = new QPushButton(QStringLiteral("저장"));
-    open->setToolTip(QStringLiteral("스크립트 파일을 불러옵니다 (.grg, .txt)"));
-    save->setToolTip(QStringLiteral("지금 쓴 스크립트를 파일로 저장합니다 (.grg, .txt)"));
+    open->setToolTip(QStringLiteral("스크립트 파일을 불러옵니다 (.onys, .txt)"));
+    save->setToolTip(QStringLiteral("지금 쓴 스크립트를 파일로 저장합니다 (.onys, .txt)"));
     row->addWidget(run);
     row->addWidget(help);
     row->addWidget(open);
     row->addWidget(save);
     row->addStretch();
-    static const QString kFilter = QStringLiteral("스크립트 (*.grg *.txt);;모든 파일 (*)");
+    static const QString kFilter = QStringLiteral("ONY 스크립트 (*.onys *.txt);;모든 파일 (*)");
     connect(open, &QPushButton::clicked, this, [this] {
         const QString p = QFileDialog::getOpenFileName(this, QStringLiteral("스크립트 열기"), QString(), kFilter);
         if (p.isEmpty()) return;
@@ -814,7 +808,7 @@ ScriptConsole::ScriptConsole(Document* doc, QWidget* parent) : QWidget(parent), 
     connect(save, &QPushButton::clicked, this, [this] {
         QString p = QFileDialog::getSaveFileName(this, QStringLiteral("스크립트 저장"), QString(), kFilter);
         if (p.isEmpty()) return;
-        if (!p.contains('.')) p += QStringLiteral(".grg");
+        if (!p.contains('.')) p += QStringLiteral(".onys");
         QFile f(p);
         if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
             output_->setPlainText(QStringLiteral("저장하지 못했습니다: ") + p);

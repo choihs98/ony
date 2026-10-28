@@ -111,6 +111,7 @@ private:
     void vectorEditDialog(int kind);
     void inbetweenDialog();
     void lipSyncDialog();
+    void batchFillDialog();
     void referenceDialog();
     void boneWarpDialog();
     void checkCollabOnOpen(const QString& path);

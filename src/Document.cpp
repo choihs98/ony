@@ -1,5 +1,6 @@
 #include <functional>
 #include "Document.h"
+#include <QColorSpace>
 #include <QDir>
 #include <QFileInfo>
 #include "Blend.h"
@@ -315,7 +316,7 @@ QImage Document::fxApplied(int layer, int key, const QImage& src) const {
     return out;
 }
 
-void Document::drawLayers(QImage& target, const QTransform& xf, int frame, const QRect& clip) const {
+void Document::drawLayers(QImage& target, const QTransform& xf, int frame, const QRect& clip, bool multiplane) const {
     for (int l = 0; l < layers_.size(); ++l) {
         const Layer& L = layers_[l];
         bool vis = L.visible;
@@ -329,7 +330,9 @@ void Document::drawLayers(QImage& target, const QTransform& xf, int frame, const
         const int k = resolveKey(l, frame);
         if (k < 0) continue;
         const QImage img = fxApplied(l, k, L.frames[k]);
-        const QTransform lxf = L.puppet ? puppetTransform(l, frame) * xf : xf;
+        // 멀티플레인: 레이어마다 따라가기 비율에 맞춘 카메라를 따로 건다
+        const QTransform base = multiplane ? cameraTransform(cameraAtFollow(frame, L.camFollow)) * xf : xf;
+        const QTransform lxf = L.puppet ? puppetTransform(l, frame) * base : base;
         if (L.blend == 0) {
             QPainter p(&target);
             if (!clip.isNull()) p.setClipRect(clip);
@@ -376,12 +379,19 @@ QImage Document::composite(int frame, bool paper, bool useCamera) const {
                      QImage::Format_ARGB32_Premultiplied);
         small.fill(paper ? QColor(Qt::white) : QColor(Qt::transparent));
         QTransform total = QTransform::fromScale(sc, sc);
-        if (useCamera && cameraEnabled_) total = cameraTransform(cameraAt(frame)) * total;
-        drawLayers(small, total, frame);
+        const bool mp = useCamera && cameraEnabled_ && hasMultiplane();
+        if (useCamera && cameraEnabled_ && !mp) total = cameraTransform(cameraAt(frame)) * total;
+        drawLayers(small, total, frame, QRect(), mp);
         return small.scaled(size_, Qt::IgnoreAspectRatio, Qt::FastTransformation)
             .convertToFormat(QImage::Format_ARGB32_Premultiplied);
     }
     QImage out(size_, QImage::Format_ARGB32_Premultiplied);
+    if (useCamera && cameraEnabled_ && hasMultiplane()) {
+        // 멀티플레인: 레이어마다 카메라가 다르므로 한 장으로 납작하게 만들 수 없다
+        out.fill(paper ? QColor(Qt::white) : QColor(Qt::transparent));
+        drawLayers(out, QTransform(), frame, QRect(), true);
+        return out;
+    }
     if (useCamera && cameraEnabled_) {
         QImage world(size_, QImage::Format_ARGB32_Premultiplied);
         world.fill(Qt::transparent);
@@ -1206,6 +1216,123 @@ QTransform Document::cameraTransform(const CameraKey& k) const {
     return t;
 }
 
+// ---------------- 자동 채색 (일괄 채색) ----------------
+int Document::floodFill(QImage& img, const QPoint& seed, const QColor& color, int tolerance) {
+    if (img.isNull() || !img.rect().contains(seed)) return 0;
+    if (img.format() != QImage::Format_ARGB32_Premultiplied)
+        img = img.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    const int w = img.width(), h = img.height();
+    const QRgb target = img.pixel(seed);
+    const QRgb fill = qPremultiply(color.rgba());
+    if (target == fill) return 0;
+    const int tol = std::max(0, tolerance);
+    auto similar = [&](QRgb c) {
+        const int d = std::abs(qAlpha(c) - qAlpha(target)) + std::abs(qRed(c) - qRed(target)) +
+                      std::abs(qGreen(c) - qGreen(target)) + std::abs(qBlue(c) - qBlue(target));
+        return d <= tol;
+    };
+    QVector<uchar> seen(size_t(w) * h, 0);
+    QVector<QPoint> stack;
+    stack.push_back(seed);
+    seen[size_t(seed.y()) * w + seed.x()] = 1;
+    int painted = 0;
+    while (!stack.isEmpty()) {
+        const QPoint c = stack.takeLast();
+        reinterpret_cast<QRgb*>(img.scanLine(c.y()))[c.x()] = fill;
+        ++painted;
+        const QPoint nb[4] = {{c.x() + 1, c.y()}, {c.x() - 1, c.y()}, {c.x(), c.y() + 1}, {c.x(), c.y() - 1}};
+        for (const QPoint& n : nb) {
+            if (n.x() < 0 || n.y() < 0 || n.x() >= w || n.y() >= h) continue;
+            uchar& st = seen[size_t(n.y()) * w + n.x()];
+            if (st) continue;
+            st = 1;
+            if (similar(reinterpret_cast<const QRgb*>(img.constScanLine(n.y()))[n.x()])) stack.push_back(n);
+        }
+    }
+    return painted;
+}
+
+void Document::recordFill(const QPoint& at, const QColor& c) {
+    if (fillMarks_.size() > 256) fillMarks_.removeFirst();
+    fillMarks_.push_back({at, c});
+}
+
+void Document::clearFillMarks() {
+    fillMarks_.clear();
+}
+
+int Document::batchFill(int layer, int from, int to, const QVector<FillMark>& marks, int tolerance) {
+    if (layer < 0 || layer >= layers_.size() || marks.isEmpty()) return 0;
+    if (layers_[layer].locked) return 0;
+    from = std::clamp(from, 0, frameCount_ - 1);
+    to = std::clamp(to, 0, frameCount_ - 1);
+    if (to < from) std::swap(from, to);
+    auto& fr = layers_[layer].frames;
+    int done = 0;
+    undo_->beginMacro(QStringLiteral("자동 채색"));
+    for (int f = from; f <= to; ++f) {
+        if (fr[f].isNull()) continue;            // 홀드 중인 칸은 건너뛴다 (키만 칠한다)
+        const QImage before = fr[f];
+        QImage after = before;
+        int painted = 0;
+        for (const FillMark& m : marks) painted += floodFill(after, m.at, m.color, tolerance);
+        if (painted <= 0) continue;
+        pushKeyEdit(layer, f, before, after, QStringLiteral("자동 채색"));
+        ++done;
+    }
+    undo_->endMacro();
+    if (done) notifyChanged();
+    return done;
+}
+
+// ---------------- 색 공간 (ICC) ----------------
+int Document::colorSpaceCount() { return 5; }
+
+QString Document::colorSpaceName(int i) {
+    static const char* n[] = {"sRGB (기본)", "Display P3", "Adobe RGB (1998)", "ProPhoto RGB", "붙이지 않음"};
+    return QString::fromUtf8(n[std::clamp(i, 0, 4)]);
+}
+
+void Document::setColorSpace(int i) {
+    i = std::clamp(i, 0, colorSpaceCount() - 1);
+    if (i == colorSpace_) return;
+    colorSpace_ = i;
+    setModified(true);
+    emit changed();
+}
+
+void Document::tagColorSpace(QImage& img) const {
+    if (img.isNull()) return;
+    QColorSpace cs;
+    switch (colorSpace_) {
+    case 0: cs = QColorSpace(QColorSpace::SRgb); break;
+    case 1: cs = QColorSpace(QColorSpace::DisplayP3); break;
+    case 2: cs = QColorSpace(QColorSpace::AdobeRgb); break;
+    case 3: cs = QColorSpace(QColorSpace::ProPhotoRgb); break;
+    default: return;   // 붙이지 않음
+    }
+    if (cs.isValid()) img.setColorSpace(cs);
+}
+
+CameraKey Document::cameraAtFollow(int frame, int followPct) const {
+    CameraKey k = cameraAt(frame);
+    const double f = std::clamp(followPct, 0, 400) / 100.0;
+    if (std::abs(f - 1.0) < 1e-9) return k;
+    // 카메라의 움직임을 비율만큼만 적용한다 (0 이면 아예 안 따라가고, 1 이면 지금과 같다)
+    CameraKey o = k;
+    o.x = k.x * f;
+    o.y = k.y * f;
+    o.rotation = k.rotation * f;
+    o.scale = 1.0 + (k.scale - 1.0) * f;
+    return o;
+}
+
+bool Document::hasMultiplane() const {
+    for (const Layer& L : layers_)
+        if (L.visible && L.camFollow != 100) return true;
+    return false;
+}
+
 QPolygonF Document::cameraFrame(int frame) const {
     bool ok = false;
     const QTransform inv = cameraTransform(cameraAt(frame)).inverted(&ok);
@@ -1340,6 +1467,7 @@ QVariantMap layerExtSave(const Layer& l) {
     m["pre"] = l.preBehavior;
     m["post"] = l.postBehavior;
     m["end"] = l.endFrame;
+    m["camfollow"] = l.camFollow;
     m["blend"] = l.blend;
     m["collapsed"] = l.collapsed;
     m["cg"] = l.colorGroup;
@@ -1385,6 +1513,7 @@ void layerExtLoad(Layer& l, const QVariantMap& m) {
     l.preBehavior = std::clamp(m.value("pre", 0).toInt(), 0, 3);
     l.postBehavior = std::clamp(m.value("post", 3).toInt(), 0, 3);
     l.endFrame = m.value("end", -1).toInt();
+    l.camFollow = std::clamp(m.value("camfollow", 100).toInt(), 0, 400);
     l.blend = std::clamp(m.value("blend", 0).toInt(), 0, Blend::Count - 1);
     l.collapsed = m.value("collapsed", false).toBool();
     l.colorGroup = m.value("cg", -1).toInt();
@@ -1442,6 +1571,7 @@ QVariantMap Document::extraSave() const {
     for (int b : bookmarks_) bm << b;
     m["bookmarks"] = bm;
     m["bookmarksOn"] = bookmarksOn_;
+    m["colorSpace"] = colorSpace_;
     QVariantList mc;
     for (const MarkColor& c : markColors_) mc << QVariant(QVariantList{c.name, c.color.name()});
     m["markColors"] = mc;
@@ -1483,6 +1613,7 @@ void Document::extraLoad(const QVariantMap& m) {
     bookmarks_.clear();
     for (const QVariant& v : m.value("bookmarks").toList()) bookmarks_.insert(v.toInt());
     bookmarksOn_ = m.value("bookmarksOn", true).toBool();
+    colorSpace_ = std::clamp(m.value("colorSpace", 0).toInt(), 0, colorSpaceCount() - 1);
     QVector<MarkColor> mc;
     for (const QVariant& v : m.value("markColors").toList()) {
         const QVariantList e = v.toList();
@@ -1785,7 +1916,9 @@ bool Document::exportFrame(int frame, const QString& path) const {
     Document* self = const_cast<Document*>(this);
     const int keep = proxyDiv_;
     self->proxyDiv_ = 1;
-    const bool ok = composite(frame, true, true).save(path, "PNG");
+    QImage out = composite(frame, true, true);
+    tagColorSpace(out);           // 내보내는 그림에 색 공간을 붙인다
+    const bool ok = out.save(path, "PNG");
     self->proxyDiv_ = keep;
     return ok;
 }

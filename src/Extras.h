@@ -26,7 +26,7 @@ bool exportXdts(const Document* doc, const QString& path, QString* error = nullp
 
 }
 
-// 간단한 스크립트 실행기 (TVPaint George 와 호환되지 않는 자체 명령어)
+// 간단한 스크립트 실행기 (ONY 자체 명령어)
 class ScriptEngine {
 public:
     explicit ScriptEngine(Document* doc) : doc_(doc) {}

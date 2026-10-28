@@ -16,6 +16,7 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QPainter>
+#include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
 #include <QTableWidget>
@@ -444,7 +445,89 @@ ToolPanel::ToolPanel(QWidget* parent) : QWidget(parent) {
     makeRow(QStringLiteral("경도"), 0, 100, 85, hardness_, hardnessV_, QStringLiteral("%"));
     makeRow(QStringLiteral("불투명도"), 1, 100, 100, opacity_, opacityV_, QStringLiteral("%"));
     pressure_ = new QCheckBox(QStringLiteral("필압 사용"));
+    pressure_->setToolTip(QStringLiteral("태블릿 펜을 누르는 세기를 굵기·진하기에 반영합니다."));
     lay->addWidget(pressure_);
+
+    // ---- 필압 조절: 무엇에 작용할지, 제일 약할 때의 값, 감도 ----
+    prBox_ = new QWidget;
+    auto* pl = new QVBoxLayout(prBox_);
+    pl->setContentsMargins(14, 2, 0, 2);
+    pl->setSpacing(3);
+    auto* whatRow = new QHBoxLayout;
+    whatRow->setSpacing(8);
+    prSize_ = new QCheckBox(QStringLiteral("굵기"));
+    prOpacity_ = new QCheckBox(QStringLiteral("진하기"));
+    prSize_->setChecked(true);
+    prOpacity_->setChecked(true);
+    whatRow->addWidget(prSize_);
+    whatRow->addWidget(prOpacity_);
+    whatRow->addStretch();
+    pl->addLayout(whatRow);
+
+    auto prRow = [&](const QString& label, int lo, int hi, int val, QSlider*& s, QSpinBox*& v,
+                     const QString& suffix, const QString& tip) {
+        auto* row = new QHBoxLayout;
+        row->setSpacing(4);
+        auto* l = new QLabel(label);
+        l->setMinimumWidth(l->fontMetrics().horizontalAdvance(QStringLiteral("최소 진하기")) + 4);
+        l->setStyleSheet("color:#a0a0a0;");
+        s = new QSlider(Qt::Horizontal);
+        s->setRange(lo, hi);
+        s->setValue(val);
+        v = new QSpinBox;
+        v->setRange(lo, hi);
+        v->setValue(val);
+        v->setSuffix(suffix);
+        v->setButtonSymbols(QAbstractSpinBox::NoButtons);
+        v->setFixedWidth(52);
+        v->setAlignment(Qt::AlignRight);
+        s->setToolTip(tip);
+        v->setToolTip(tip);
+        l->setToolTip(tip);
+        row->addWidget(l);
+        row->addWidget(s, 1);
+        row->addWidget(v);
+        pl->addLayout(row);
+    };
+    prRow(QStringLiteral("최소 굵기"), 0, 100, 6, prMinSize_, prMinSizeV_, QStringLiteral("%"),
+          QStringLiteral("가장 약하게 눌렀을 때의 굵기입니다. 0% 면 선이 점으로 사라지고, 100% 면 필압이 굵기에 영향을 주지 않습니다."));
+    prRow(QStringLiteral("최소 진하기"), 0, 100, 0, prMinOp_, prMinOpV_, QStringLiteral("%"),
+          QStringLiteral("가장 약하게 눌렀을 때의 진하기입니다."));
+    prRow(QStringLiteral("감도"), -100, 100, -35, prCurve_, prCurveV_, QString(),
+          QStringLiteral("음수로 갈수록 살짝만 눌러도 굵고 진하게 나오고, 양수로 갈수록 꾹 눌러야 나옵니다. 0 이 그대로입니다."));
+
+    prPreview_ = new PressurePreview;
+    prPreview_->setToolTip(QStringLiteral("왼쪽은 살짝 누른 쪽, 오른쪽은 꾹 누른 쪽입니다."));
+    pl->addWidget(prPreview_);
+    lay->addWidget(prBox_);
+    prBox_->setEnabled(false);
+    connect(pressure_, &QCheckBox::toggled, prBox_, &QWidget::setEnabled);
+    // 지난번에 맞춰 둔 값을 되살린다 (프리셋을 바꿔도 이 설정은 그대로 둔다)
+    {
+        QSettings st("Ony", "Ony");
+        QSignalBlocker d1(prSize_), d2(prOpacity_), d3(prMinSize_), d4(prMinSizeV_), d5(prMinOp_), d6(prMinOpV_),
+            d7(prCurve_), d8(prCurveV_);
+        prSize_->setChecked(st.value("pressure/size", true).toBool());
+        prOpacity_->setChecked(st.value("pressure/opacity", true).toBool());
+        const int ms = std::clamp(st.value("pressure/minSize", 6).toInt(), 0, 100);
+        const int mo = std::clamp(st.value("pressure/minOpacity", 0).toInt(), 0, 100);
+        const int cv = std::clamp(st.value("pressure/curve", -35).toInt(), -100, 100);
+        prMinSize_->setValue(ms);
+        prMinSizeV_->setValue(ms);
+        prMinOp_->setValue(mo);
+        prMinOpV_->setValue(mo);
+        prCurve_->setValue(cv);
+        prCurveV_->setValue(cv);
+    }
+    for (QCheckBox* c : {prSize_, prOpacity_})
+        connect(c, &QCheckBox::toggled, this, [this](bool) { emitParams(); });
+    const QVector<QPair<QSlider*, QSpinBox*>> prPairs{
+        {prMinSize_, prMinSizeV_}, {prMinOp_, prMinOpV_}, {prCurve_, prCurveV_}};
+    for (const auto& pr : prPairs) {
+        connect(pr.first, &QSlider::valueChanged, pr.second, &QSpinBox::setValue);
+        connect(pr.second, QOverload<int>::of(&QSpinBox::valueChanged), pr.first, &QSlider::setValue);
+        connect(pr.first, &QSlider::valueChanged, this, [this](int) { emitParams(); });
+    }
     auto* smoothRow = new QHBoxLayout;
     smoothLabel_ = new QLabel(QStringLiteral("보정 세기"));
     smooth_ = new QSlider(Qt::Horizontal);
@@ -464,6 +547,18 @@ ToolPanel::ToolPanel(QWidget* parent) : QWidget(parent) {
     customRow_ = new QComboBox;
     customRow_->addItem(QStringLiteral("브러시 모양: 기본"), -1);
     lay->addWidget(customRow_);
+    // 그림 여러 장짜리(애니메이션) 브러시를 어떤 순서로 찍을지. 한 장짜리면 쓰이지 않는다.
+    animMode_ = new QComboBox;
+    animMode_->addItem(QStringLiteral("여러 장 브러시: 차례대로"), 0);
+    animMode_->addItem(QStringLiteral("여러 장 브러시: 무작위"), 1);
+    animMode_->setToolTip(QStringLiteral("그림 여러 장으로 만든 브러시를 찍을 때 다음 장을 고르는 방법입니다."));
+    animMode_->setEnabled(false);
+    lay->addWidget(animMode_);
+    connect(animMode_, &QComboBox::currentIndexChanged, this, [this](int) { emitParams(); });
+    connect(customRow_, &QComboBox::currentIndexChanged, this, [this](int) {
+        const int id = customRow_->currentData().toInt();
+        animMode_->setEnabled(customBrushFrameCount(id) > 1);
+    });
     lay->addStretch();
 
     // 슬라이더 <-> 숫자 칸 동기화
@@ -501,8 +596,9 @@ ToolPanel::ToolPanel(QWidget* parent) : QWidget(parent) {
             hardnessV_->setValue(pr.hardness);
             pressure_->setChecked(pr.pressure);
         }
+        prBox_->setEnabled(pr.pressure);   // 신호를 막아 둔 사이에도 같이 따라가게 한다
         syncIcons(row);
-        emit paramsChanged(params());
+        emitParams();
         emit brushSelected(row);
     });
     syncIcons(0);
@@ -521,8 +617,14 @@ BrushParams ToolPanel::params() const {
     p.opacity = opacity_->value();
     p.hardness = hardness_->value();
     p.pressure = pressure_->isChecked();
+    p.prSize = prSize_->isChecked();
+    p.prOpacity = prOpacity_->isChecked();
+    p.prMinSize = prMinSize_->value();
+    p.prMinOpacity = prMinOp_->value();
+    p.prCurve = prCurve_->value();
     p.tilt = tilt_->isChecked();
     p.customBrush = customRow_ ? customRow_->currentData().toInt() : -1;
+    p.animMode = animMode_ ? animMode_->currentData().toInt() : 0;
     p.preset = std::max(0, list_->currentRow());
     return p;
 }
@@ -536,6 +638,20 @@ void ToolPanel::setParams(const BrushParams& p) {
     hardness_->setValue(p.hardness);
     hardnessV_->setValue(p.hardness);
     pressure_->setChecked(p.pressure);
+    {
+        QSignalBlocker c1(prSize_), c2(prOpacity_), c3(prMinSize_), c4(prMinSizeV_), c5(prMinOp_), c6(prMinOpV_),
+            c7(prCurve_), c8(prCurveV_);
+        prSize_->setChecked(p.prSize);
+        prOpacity_->setChecked(p.prOpacity);
+        prMinSize_->setValue(p.prMinSize);
+        prMinSizeV_->setValue(p.prMinSize);
+        prMinOp_->setValue(p.prMinOpacity);
+        prMinOpV_->setValue(p.prMinOpacity);
+        prCurve_->setValue(p.prCurve);
+        prCurveV_->setValue(p.prCurve);
+    }
+    prBox_->setEnabled(p.pressure);
+    if (prPreview_) prPreview_->setParams(p);
     QSignalBlocker b8(tilt_), b9(customRow_);
     tilt_->setChecked(p.tilt);
     const int ci = customRow_->findData(p.customBrush);
@@ -569,7 +685,62 @@ void ToolPanel::selectPreset(int row) {
 }
 
 void ToolPanel::emitParams() {
-    emit paramsChanged(params());
+    const BrushParams p = params();
+    if (prPreview_) prPreview_->setParams(p);
+    if (prSize_) {   // 필압 설정은 다음에 켤 때도 그대로 쓰도록 적어 둔다
+        QSettings st("Ony", "Ony");
+        st.setValue("pressure/size", p.prSize);
+        st.setValue("pressure/opacity", p.prOpacity);
+        st.setValue("pressure/minSize", p.prMinSize);
+        st.setValue("pressure/minOpacity", p.prMinOpacity);
+        st.setValue("pressure/curve", p.prCurve);
+    }
+    emit paramsChanged(p);
+}
+
+// ---------------- PressurePreview ----------------
+PressurePreview::PressurePreview(QWidget* parent) : QWidget(parent) {
+    setMinimumHeight(36);
+}
+
+void PressurePreview::setParams(const BrushParams& p) {
+    p_ = p;
+    update();
+}
+
+void PressurePreview::paintEvent(QPaintEvent*) {
+    QPainter g(this);
+    g.setRenderHint(QPainter::Antialiasing, true);
+    const QRectF r = QRectF(rect()).adjusted(1, 1, -1, -1);
+    g.setPen(QPen(QColor(0x50, 0x54, 0x58), 1));
+    g.setBrush(QColor(0xf2, 0xf2, 0xf2));
+    g.drawRoundedRect(r, 3, 3);
+    if (r.width() < 12) return;
+
+    // 왼쪽 끝(살짝 누름)에서 오른쪽 끝(꾹 누름)까지, 설정대로 굵기와 진하기를 바꿔 가며 칠한다
+    const double cy = r.center().y();
+    const double maxR = std::max(1.0, std::min(r.height() * 0.40, 11.0));
+    const int n = int(r.width());
+    g.setPen(Qt::NoPen);
+    for (int i = 0; i < n; ++i) {
+        const double t = n > 1 ? double(i) / (n - 1) : 1.0;
+        double sm = 1.0, om = 1.0;
+        pressureFactors(p_, t, &sm, &om);
+        const double rad = std::max(0.4, maxR * sm);
+        QColor c(0x20, 0x20, 0x20);
+        c.setAlphaF(std::clamp(om * (p_.opacity / 100.0), 0.0, 1.0));
+        g.setBrush(c);
+        g.drawEllipse(QPointF(r.left() + i + 0.5, cy), rad, rad);
+    }
+    // 양 끝에 무엇을 뜻하는지 적어 둔다
+    QFont f = g.font();
+    f.setPointSizeF(std::max(7.0, f.pointSizeF() - 2.0));
+    g.setFont(f);
+    g.setPen(QColor(0x80, 0x80, 0x80));
+    g.drawText(QRectF(r.left() + 3, r.top(), r.width() / 2, r.height()), Qt::AlignLeft | Qt::AlignTop,
+               QStringLiteral("살짝"));
+    g.drawText(QRectF(r.center().x(), r.top(), r.width() / 2 - 3, r.height()), Qt::AlignRight | Qt::AlignTop,
+               QStringLiteral("꾹"));
 }
 
 // ---------------- LayerStackPanel ----------------

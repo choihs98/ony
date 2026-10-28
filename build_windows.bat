@@ -1,5 +1,5 @@
 @echo off
-REM tvp-parity Windows 빌드 스크립트
+REM ONY Windows 빌드 스크립트
 REM 필요: Visual Studio 2022 Build Tools(C++), CMake, Python 3
 REM 실행: "x64 Native Tools Command Prompt for VS 2022" 에서 이 파일을 실행
 setlocal

@@ -90,8 +90,33 @@ QPointF CanvasWidget::imageTopLeft() const {
     return QPointF((width() - s.width() * zoom_) / 2.0, (height() - s.height() * zoom_) / 2.0) + pan_;
 }
 
+// 화면 한가운데를 축으로 도는 변환. 각도가 0 이면 아무 것도 하지 않는 변환이라 예전과 같은 길이다.
+QTransform CanvasWidget::viewRotation(bool inverse) const {
+    QTransform t;
+    if (viewAngle_ == 0) return t;
+    const QPointF c(width() / 2.0, height() / 2.0);
+    t.translate(c.x(), c.y());
+    t.rotate(inverse ? -viewAngle_ : viewAngle_);
+    t.translate(-c.x(), -c.y());
+    return t;
+}
+
+void CanvasWidget::setViewAngle(qreal deg) {
+    // -180 ~ 180 으로 접어 둔다
+    while (deg <= -180.0) deg += 360.0;
+    while (deg > 180.0) deg -= 360.0;
+    if (std::abs(deg) < 1e-9) deg = 0;
+    if (std::abs(deg - viewAngle_) < 1e-9) return;
+    viewAngle_ = deg;
+    update();
+    emit viewAngleChanged(viewAngle_);
+    emit viewChanged();
+}
+
 QPointF CanvasWidget::toImage(const QPointF& p) const {
-    return (p - imageTopLeft()) / zoom_;
+    // 화면 좌표를 먼저 거꾸로 돌린 뒤, 예전과 같은 셈을 한다
+    const QPointF q = viewAngle_ == 0 ? p : viewRotation(true).map(p);
+    return (q - imageTopLeft()) / zoom_;
 }
 
 void CanvasWidget::zoomBy(qreal factor) {
@@ -145,9 +170,12 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
         cacheDirty_ = false;
         partialDirty_ = QRect();
     }
+    // 보기 각도가 있으면 여기서부터 화면 한가운데를 축으로 돌려 그린다.
+    // 아래 그리기 코드는 돌지 않은 좌표를 그대로 쓰므로 손댈 것이 없다.
+    if (viewAngle_ != 0) p.setTransform(viewRotation());
     const QSize s = doc_->size();
     const QRectF r(imageTopLeft(), QSizeF(s.width() * zoom_, s.height() * zoom_));
-    p.setRenderHint(QPainter::SmoothPixmapTransform, zoom_ < 1.0);
+    p.setRenderHint(QPainter::SmoothPixmapTransform, zoom_ < 1.0 || viewAngle_ != 0);
     // 참조 이미지를 캔버스 자리에 비율을 지켜 맞춘다
     auto drawReference = [&] {
         if (ref_.isNull() || refOpacity_ <= 0.001) return;
@@ -163,7 +191,10 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
     };
     if (!refOnTop_) drawReference();
     // 화면에 보이는 부분만 그린다 (크게 확대했을 때 특히 빠르다)
-    const QRectF visible = QRectF(rect()).intersected(r);
+    // 돌려 놓았으면 화면 사각형을 거꾸로 돌린 뒤 그 테두리로 본다
+    const QRectF screenInView =
+        viewAngle_ == 0 ? QRectF(rect()) : viewRotation(true).map(QRectF(rect())).boundingRect();
+    const QRectF visible = screenInView.intersected(r);
     if (visible.isEmpty()) {
         // 캔버스가 화면 밖이면 그릴 것이 없다
     } else if (visible == r) {
@@ -174,7 +205,7 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
         p.drawImage(visible, cache_, src);
     }
 
-    // 라이트 테이블: 앞뒤 이미지를 색을 입혀 흐리게 표시 (TVPaint 의 라이트 테이블과 같은 개념)
+    // 라이트 테이블: 앞뒤 이미지를 색을 입혀 흐리게 표시 (앞뒤 그림을 비쳐 보는 기능)
     // 여러 장을 매번 겹쳐 그리면 느리므로, 한 장으로 미리 합쳐 두고 그것만 그린다.
     if (lightTable_ && ltOverlayFrame_ == doc_->currentFrame() && !ltOverlay_.isNull() &&
         ltOverlay_.size() == doc_->size()) {
@@ -1213,6 +1244,8 @@ void CanvasWidget::bucketFill(const QPoint& seed) {
         }
     }
     doc_->notifyChanged();
+    // 자동 채색(일괄)에서 그대로 다시 쓸 수 있게 적어 둔다
+    doc_->recordFill(seed, colorA_);
     commitEdit(QStringLiteral("페인트통"));
 }
 

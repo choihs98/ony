@@ -325,7 +325,7 @@ void TimelineWidget::paintEvent(QPaintEvent* ev) {
             p.setPen(grid);
             p.drawLine(c.right(), y, c.right(), y + rowH_);
         }
-        // ---- 프리/포스트 비헤이비어 단추 (TVPaint 처럼 내용의 앞뒤 칸에)
+        // ---- 프리/포스트 비헤이비어 단추 (내용의 앞뒤 칸에)
         for (int which = 0; which < 2; ++which) {
             const QRect br = behaviorButton(row, which);
             if (br.isNull() || br.right() < clip.left() - 4 || br.left() > clip.right() + 4) continue;

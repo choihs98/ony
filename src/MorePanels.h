@@ -7,7 +7,7 @@
 class CanvasWidget;
 class Document;
 
-// TVPaint 12 패널 상단 오른쪽의 세 아이콘: ● 위치 잠금, ▭ 접기, ▶ 닫기 (문서 순서)
+// 패널 제목줄 오른쪽의 세 단추: ● 위치 고정, ▭ 접기, ✕ 닫기
 class DockTitleBar : public QWidget {
     Q_OBJECT
 public:

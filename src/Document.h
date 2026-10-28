@@ -50,6 +50,9 @@ struct Layer {
     QVector<QImage> frames;
     int folder = -1;          // 소속 폴더 인덱스 (-1: 없음)
     bool ctgLines = false;    // CTG 선화 레이어: 바로 아래 레이어가 색 레이어
+    // 멀티플레인: 카메라가 움직일 때 이 레이어가 얼마나 따라갈지 (%).
+    // 100 = 카메라와 똑같이(기준면), 작을수록 멀리 있는 배경처럼 덜 움직이고, 클수록 앞쪽처럼 더 움직인다.
+    int camFollow = 100;
     QVector<Effects::Item> fx;
     // ---- 타임라인 옵션 (매뉴얼: Animation additional functions) ----
     int preBehavior = 0;      // 첫 이미지 이전: 0 없음, 1 반복, 2 핑퐁, 3 정지(홀드)
@@ -204,6 +207,34 @@ public:
     void removeCameraKey(int frame);
     const QMap<int, CameraKey>& cameraKeys() const { return cameraKeys_; }
     QTransform cameraTransform(const CameraKey& k) const;
+    // ---- 자동 채색 (일괄 채색) ----
+    // 한 번의 페인트통 칠을 적어 둔 것. 이것을 다른 프레임에 똑같이 다시 칠한다.
+    struct FillMark {
+        QPoint at;
+        QColor color;
+    };
+    const QVector<FillMark>& fillMarks() const { return fillMarks_; }
+    void recordFill(const QPoint& at, const QColor& c);
+    void clearFillMarks();
+    // 한 장에 칠하기. 칠한 픽셀 수를 돌려준다.
+    static int floodFill(QImage& img, const QPoint& seed, const QColor& color, int tolerance = 48);
+    // layer 의 from~to 프레임에 marks 를 그대로 다시 칠한다. 칠한 프레임 수를 돌려준다.
+    // 이미지가 있는 프레임(키)만 칠하고, 홀드 중인 칸은 건너뛴다.
+    int batchFill(int layer, int from, int to, const QVector<FillMark>& marks, int tolerance = 48);
+
+    // ---- 색 공간 (ICC) ----
+    // 0 sRGB, 1 Display P3, 2 Adobe RGB, 3 ProPhoto RGB, 4 색 공간 없음
+    int colorSpace() const { return colorSpace_; }
+    void setColorSpace(int i);
+    static QString colorSpaceName(int i);
+    static int colorSpaceCount();
+    // 내보낼 그림에 색 공간을 붙인다 (없음이면 그대로 둔다)
+    void tagColorSpace(QImage& img) const;
+
+    // 레이어의 따라가기 비율(%)만큼 약하게 만든 카메라 키
+    CameraKey cameraAtFollow(int frame, int followPct) const;
+    // 따라가기 비율이 100 이 아닌 보이는 레이어가 하나라도 있는가
+    bool hasMultiplane() const;
     QPolygonF cameraFrame(int frame) const;   // 월드 좌표계에서 본 카메라 영역
 
     // ---- 렌더 카메라 ----
@@ -364,7 +395,8 @@ private:
     void resetLayersTo(const QString& firstName);
     QVariantMap extraSave() const;
     void extraLoad(const QVariantMap& m);
-    void drawLayers(QImage& target, const QTransform& xf, int frame, const QRect& clip = QRect()) const;
+    void drawLayers(QImage& target, const QTransform& xf, int frame, const QRect& clip = QRect(),
+                    bool multiplane = false) const;
 
     QSize size_{1280, 720};
     int fps_ = 24;
@@ -388,6 +420,8 @@ private:
     QVector<MarkColor> markColors_{{QStringLiteral("빨강"), QColor(0xe5, 0x39, 0x35)}};
     bool soloCurrent_ = false;
     bool newImagePastEnd_ = true;
+    int colorSpace_ = 0;
+    QVector<FillMark> fillMarks_;
     QUndoStack* undo_;
     // 효과(FX) 결과 캐시: 같은 그림에 같은 효과면 다시 계산하지 않는다
     struct FxCacheEntry {

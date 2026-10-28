@@ -5,7 +5,7 @@
 
 class QStyle;
 
-// TVPaint 12 의 어두운 회색 화면을 닮은 테마와, 코드로 그리는 아이콘 모음.
+// 어두운 회색 테마와, 코드로 그리는 아이콘 모음.
 namespace Style {
 struct Scheme {
     QColor window, dark, base, text, muted, button, accent, canvasBg;

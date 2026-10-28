@@ -5,6 +5,8 @@
 #include "MainWindow.h"
 #include "CanvasWidget.h"
 #include "Document.h"
+#include "EditExport.h"
+#include "RenderQueue.h"
 #include "LipSync.h"
 #include "Extras.h"
 #include "Effects.h"
@@ -271,7 +273,7 @@ void MainWindow::buildCentral() {
     lay->setContentsMargins(0, 0, 0, 0);
     lay->setSpacing(0);
 
-    // ---- 캔버스 위 정보줄 (TVPaint: 프로젝트 / 클립 / 확대율 / 각도 / 현재 레이어 / 현재 이미지)
+    // ---- 캔버스 위 정보줄: 프로젝트 / 클립 / 확대율 / 각도 / 현재 레이어 / 현재 이미지
     canvasInfo_ = new QLabel;
     canvasInfo_->setContentsMargins(8, 3, 8, 3);
     canvasInfo_->setStyleSheet("color:#a8a8a8;");
@@ -532,7 +534,7 @@ void MainWindow::buildCentral() {
     th->addStretch();
     lay->addWidget(tabsRow);
 
-    // ---- 정보 바 (TVPaint: 좌표 · 색 · 프록시 · … · 룸) ----
+    // ---- 정보 바: 좌표 · 색 · 프록시 · … · 룸 ----
     auto* info = new QWidget;
     auto* ih = new QHBoxLayout(info);
     ih->setContentsMargins(6, 2, 6, 2);
@@ -580,6 +582,7 @@ void MainWindow::buildCentral() {
         updateInfo();
     });
     connect(canvas_, &CanvasWidget::zoomChanged, this, [this](qreal) { updateInfo(); });
+    connect(canvas_, &CanvasWidget::viewAngleChanged, this, [this](qreal) { updateInfo(); });
     connect(canvas_, &CanvasWidget::message, this, [this](const QString& m) { statusBar()->showMessage(m, 3000); });
     connect(doc_, &Document::changed, this, [this] { hoverCacheValid_ = false; });
     connect(doc_, &Document::currentChanged, this, [this] { hoverCacheValid_ = false; });
@@ -1372,6 +1375,85 @@ void MainWindow::referenceDialog() {
 }
 
 // 입 모양(립싱크) 맞추기: 대사를 음소 열로 바꾸고, 음소마다 묶어 둔 라이브러리 이미지를 프레임에 깐다
+// 자동 채색: 지금 프레임에서 페인트통으로 칠한 자리·색을, 고른 구간의 다른 프레임에 그대로 다시 칠한다
+void MainWindow::batchFillDialog() {
+    const auto marks = doc_->fillMarks();
+    if (marks.isEmpty()) {
+        QMessageBox::information(
+            this, QStringLiteral("자동 채색"),
+            QStringLiteral("먼저 한 프레임을 페인트통으로 칠해 주세요.\n\n"
+                           "칠한 자리와 색을 기억해 두었다가, 여기서 고른 구간의 다른 프레임에 똑같이 칠해 줍니다.\n"
+                           "선이 조금씩 움직이는 선화라면 같은 자리가 같은 칸 안에 들어가야 제대로 칠해집니다."));
+        return;
+    }
+    const int l = doc_->currentLayer();
+    if (doc_->layer(l).locked) {
+        QMessageBox::information(this, QStringLiteral("자동 채색"), QStringLiteral("잠긴 레이어에는 칠할 수 없습니다."));
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("자동 채색"));
+    dlg.setMinimumWidth(460);
+    auto* lay = new QVBoxLayout(&dlg);
+    auto* head = new QLabel(QStringLiteral("기억해 둔 칠하기 %1개를 고른 구간에 다시 칠합니다.\n"
+                                           "그림이 있는 프레임(키)만 칠하고, 홀드 중인 칸은 건너뜁니다.")
+                                .arg(marks.size()));
+    head->setWordWrap(true);
+    lay->addWidget(head);
+
+    auto* form = new QFormLayout;
+    auto* from = new QSpinBox;
+    auto* to = new QSpinBox;
+    from->setRange(1, doc_->frameCount());
+    to->setRange(1, doc_->frameCount());
+    // 타임라인에 구간을 잡아 뒀으면 그것을 기본으로 쓴다
+    if (timeline_->rangeStart() >= 0) {
+        from->setValue(timeline_->rangeStart() + 1);
+        to->setValue(timeline_->rangeEnd() + 1);
+    } else {
+        from->setValue(doc_->currentFrame() + 1);
+        to->setValue(doc_->frameCount());
+    }
+    auto* tol = new QSpinBox;
+    tol->setRange(0, 255);
+    tol->setValue(48);
+    tol->setToolTip(QStringLiteral("색이 얼마나 비슷해야 같은 칸으로 볼지. 크면 선을 넘어 번질 수 있습니다."));
+    form->addRow(QStringLiteral("시작 프레임"), from);
+    form->addRow(QStringLiteral("끝 프레임"), to);
+    form->addRow(QStringLiteral("비슷함 범위"), tol);
+    lay->addLayout(form);
+
+    auto* list = new QLabel;
+    list->setWordWrap(true);
+    QStringList items;
+    for (int i = 0; i < marks.size() && i < 12; ++i)
+        items << QString("(%1, %2) %3").arg(marks[i].at.x()).arg(marks[i].at.y()).arg(marks[i].color.name());
+    if (marks.size() > 12) items << QStringLiteral("… 외 %1개").arg(marks.size() - 12);
+    list->setText(QStringLiteral("칠할 자리: ") + items.join(QStringLiteral(", ")));
+    list->setStyleSheet("color:#a0a0a0;");
+    lay->addWidget(list);
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    bb->button(QDialogButtonBox::Ok)->setText(QStringLiteral("칠하기"));
+    bb->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("취소"));
+    auto* forget = bb->addButton(QStringLiteral("기억 지우기"), QDialogButtonBox::ResetRole);
+    connect(forget, &QPushButton::clicked, &dlg, [this, &dlg] {
+        doc_->clearFillMarks();
+        dlg.reject();
+        statusBar()->showMessage(QStringLiteral("기억해 둔 칠하기를 지웠습니다."), 4000);
+    });
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    lay->addWidget(bb);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const int n = doc_->batchFill(l, from->value() - 1, to->value() - 1, marks, tol->value());
+    statusBar()->showMessage(n > 0 ? QStringLiteral("%1개 프레임을 칠했습니다.").arg(n)
+                                   : QStringLiteral("칠한 프레임이 없습니다. 구간에 그려진 이미지가 있는지 확인해 주세요."),
+                             6000);
+}
+
 void MainWindow::lipSyncDialog() {
     if (doc_->libraryCount() == 0) {
         QMessageBox::information(
@@ -2494,6 +2576,32 @@ void MainWindow::buildMenus() {
     file->addSeparator();
     act(file, "저장", [this] { saveProject(); }, QKeySequence::Save);
     act(file, "다른 이름으로 저장...", [this] { saveProjectAs(); }, QKeySequence::SaveAs);
+    act(file, "배치 렌더 (여러 개 한 번에)...", [this] {
+        RenderQueueDialog dlg(doc_, this);
+        dlg.exec();
+    }, QKeySequence("Ctrl+Shift+B"));
+    act(file, "편집용으로 내보내기 (EDL / XML)...", [this] {
+        const QVector<EditExport::Cut> cuts = EditExport::cutsOf(doc_);
+        const QString base = doc_->path().isEmpty() ? QStringLiteral("ONY") : QFileInfo(doc_->path()).completeBaseName();
+        QString sel;
+        const QString p = QFileDialog::getSaveFileName(
+            this, QStringLiteral("편집용으로 내보내기"), base,
+            QStringLiteral("EDL (*.edl);;Final Cut / 프리미어 XML (*.xml)"), &sel);
+        if (p.isEmpty()) return;
+        const bool wantXml = sel.contains(QStringLiteral("XML")) || p.endsWith(".xml", Qt::CaseInsensitive);
+        QString out = p;
+        if (!out.contains('.')) out += wantXml ? ".xml" : ".edl";
+        // 영상 파일을 함께 넘기면 편집기가 바로 물린다 (없어도 타임라인은 들어간다)
+        const QString media = QFileInfo(out).dir().filePath(base + ".mov");
+        const QString err = wantXml ? EditExport::writeFcpXml(doc_, out, base, media)
+                                    : EditExport::writeEdl(doc_, out, base);
+        if (!err.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("편집용으로 내보내기"), err);
+            return;
+        }
+        statusBar()->showMessage(
+            QStringLiteral("컷 %1개를 내보냈습니다: %2   (컷은 북마크로 나뉩니다)").arg(cuts.size()).arg(QDir::toNativeSeparators(out)), 8000);
+    });
     act(file, "묶어서 저장 (소리까지 한 폴더로)...", [this] {
         const QString p = QFileDialog::getSaveFileName(
             this, QStringLiteral("묶어서 저장"),
@@ -2853,6 +2961,53 @@ void MainWindow::buildMenus() {
             tool_->refreshCustomBrushes();
             statusBar()->showMessage(id >= 0 ? QStringLiteral("브러시를 만들었습니다. 도구 패널 아래에서 고르세요.") : QStringLiteral("만들지 못했습니다."), 7000);
         });
+        act(cb, "애니메이션 브러시 만들기 (그림 여러 장)...", [this] {
+            const QStringList ps = QFileDialog::getOpenFileNames(
+                this, QStringLiteral("브러시로 쓸 그림들 (고른 순서가 아니라 이름 순으로 돕니다)"), QString(),
+                QStringLiteral("그림 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"));
+            if (ps.isEmpty()) return;
+            QStringList sorted = ps;
+            sorted.sort();
+            QVector<QImage> frames;
+            for (const QString& f : sorted) {
+                QImage im(f);
+                if (!im.isNull()) frames.push_back(im);
+            }
+            if (frames.size() < 2) {
+                statusBar()->showMessage(QStringLiteral("그림을 두 장 이상 골라 주세요. (읽은 그림 %1장)").arg(frames.size()), 5000);
+                return;
+            }
+            const int id = addAnimBrush(QFileInfo(sorted.first()).completeBaseName() + QStringLiteral(" 외 %1").arg(frames.size() - 1), frames);
+            tool_->refreshCustomBrushes();
+            statusBar()->showMessage(id >= 0 ? QStringLiteral("그림 %1장짜리 애니메이션 브러시를 만들었습니다. 도구 패널 아래에서 고르세요.").arg(frames.size())
+                                             : QStringLiteral("만들지 못했습니다."), 7000);
+        });
+        act(cb, "현재 레이어의 이미지들로 애니메이션 브러시 만들기", [this] {
+            const int l = doc_->currentLayer();
+            QVector<QImage> frames;
+            for (int f = 0; f < doc_->frameCount(); ++f) {
+                const QImage& im = doc_->layer(l).frames[f];
+                if (im.isNull()) continue;
+                // 비어 있는 가장자리는 잘라내고 그려진 부분만 쓴다
+                int x0 = im.width(), y0 = im.height(), x1 = -1, y1 = -1;
+                for (int y = 0; y < im.height(); ++y)
+                    for (int x = 0; x < im.width(); ++x)
+                        if (qAlpha(im.pixel(x, y)) > 0) {
+                            x0 = std::min(x0, x); y0 = std::min(y0, y);
+                            x1 = std::max(x1, x); y1 = std::max(y1, y);
+                        }
+                if (x1 < x0 || y1 < y0) continue;
+                frames.push_back(im.copy(QRect(QPoint(x0, y0), QPoint(x1, y1))));
+            }
+            if (frames.size() < 2) {
+                statusBar()->showMessage(QStringLiteral("이 레이어에 그려진 이미지가 두 장 이상 있어야 합니다."), 5000);
+                return;
+            }
+            const int id = addAnimBrush(doc_->layer(l).name + QStringLiteral(" 브러시"), frames);
+            tool_->refreshCustomBrushes();
+            statusBar()->showMessage(id >= 0 ? QStringLiteral("그림 %1장짜리 애니메이션 브러시를 만들었습니다.").arg(frames.size())
+                                             : QStringLiteral("만들지 못했습니다."), 7000);
+        });
         act(cb, "사용자 브러시 모두 지우기", [this] {
             clearCustomBrushes();
             tool_->refreshCustomBrushes();
@@ -2906,6 +3061,7 @@ void MainWindow::buildMenus() {
         if (doc_->layer(l).locked || doc_->layer(l).frames[f].isNull()) return;
         doc_->pushKeyEdit(l, f, doc_->layer(l).frames[f], QImage(), QStringLiteral("키 이미지 지우기"));
     });
+    act(image, "자동 채색 (여러 프레임에 한 번에)...", [this] { batchFillDialog(); });
     act(image, "입 모양 맞추기 (립싱크)...", [this] { lipSyncDialog(); }, QKeySequence("Ctrl+Alt+L"));
     act(image, "프레임 추가 (뒤에 빈 프레임 끼우기)", [this] {
         doc_->insertFrame(doc_->currentFrame() + 1);
@@ -2942,7 +3098,7 @@ void MainWindow::buildMenus() {
         pastEnd->setCheckable(true);
         pastEnd->setChecked(doc_->newImagePastEnd());
         pastEnd->setToolTip(QStringLiteral(
-            "켜면 TVPaint 처럼, 유지되고 있는 이미지 뒤의 프레임에 그릴 때 그 자리에 새 이미지가 생깁니다. "
+            "켜면 유지되고 있는 이미지 뒤의 프레임에 그릴 때 그 자리에 새 이미지가 생깁니다. "
             "끄면 유지되던 이미지를 그대로 고칩니다."));
         connect(pastEnd, &QAction::toggled, this, [this](bool on) {
             doc_->setNewImagePastEnd(on);
@@ -3127,6 +3283,18 @@ void MainWindow::buildMenus() {
     act(view, "화면에 맞춤", [this] { canvas_->zoomFit(); }, QKeySequence("Ctrl+0"));
     act(view, "100%", [this] { canvas_->zoomActual(); }, QKeySequence("Ctrl+1"));
     view->addSeparator();
+    // 캔버스 회전: 종이를 돌려 가며 그리는 것처럼 화면만 돌린다 (그림 자체는 그대로)
+    act(view, "캔버스 왼쪽으로 돌리기 (15°)", [this] { canvas_->rotateView(-15); }, QKeySequence("Ctrl+Shift+,"));
+    act(view, "캔버스 오른쪽으로 돌리기 (15°)", [this] { canvas_->rotateView(15); }, QKeySequence("Ctrl+Shift+."));
+    act(view, "캔버스 각도 초기화", [this] { canvas_->resetViewAngle(); }, QKeySequence("Ctrl+Shift+0"));
+    act(view, "캔버스 각도 지정...", [this] {
+        bool ok = false;
+        const double v = QInputDialog::getDouble(this, QStringLiteral("캔버스 각도"),
+                                                 QStringLiteral("각도 (-180 ~ 180):"), canvas_->viewAngle(),
+                                                 -180.0, 180.0, 1, &ok);
+        if (ok) canvas_->setViewAngle(v);
+    });
+    view->addSeparator();
     act(view, "참조 이미지...", [this] { referenceDialog(); }, QKeySequence("Ctrl+Alt+R"));
     {
         QAction* sa = view->addAction(QStringLiteral("소리 스크럽 (프레임 옮길 때 소리 듣기)"));
@@ -3281,7 +3449,7 @@ void MainWindow::buildMenus() {
     addDockToggle(tb, dockGuides_, "guides", "가이드라인 패널");
     addDockToggle(tb, dockShare_, "share", "공유 관리자");
     tb->addSeparator();
-    // 클립 탭 (TVPaint 의 문서 탭 자리)
+    // 클립 탭
     clipTabs_ = new QTabBar;
     clipTabs_->setDrawBase(false);
     clipTabs_->setExpanding(false);
@@ -3325,12 +3493,47 @@ void MainWindow::buildMenus() {
     addTab->setToolTip(QStringLiteral("새 클립"));
     connect(addTab, &QToolButton::clicked, this, [this] { newClip(); });
     tb->addWidget(addTab);
+    // 메뉴 찾기: 이름의 일부를 적고 Enter 를 누르면 맞는 메뉴 항목을 모아 보여 주고, 고르면 바로 실행한다
     auto* helpSearch = new QLineEdit;
-    helpSearch->setPlaceholderText(QStringLiteral("? 매뉴얼 검색"));
+    helpSearch->setObjectName(QStringLiteral("menuSearch"));   // 검사에서 문구와 상관없이 찾을 수 있게
+    helpSearch->setPlaceholderText(QStringLiteral("메뉴 찾기"));
+    helpSearch->setToolTip(QStringLiteral("메뉴 이름의 일부를 적고 Enter 를 누르면 맞는 항목을 보여 줍니다."));
     helpSearch->setMaximumWidth(160);
-    connect(helpSearch, &QLineEdit::returnPressed, this, [helpSearch] {
+    helpSearch->setClearButtonEnabled(true);
+    connect(helpSearch, &QLineEdit::returnPressed, this, [this, helpSearch] {
         const QString q = helpSearch->text().trimmed();
-        if (!q.isEmpty()) QDesktopServices::openUrl(QUrl("https://doc.tvpaint.com/search?q=" + QUrl::toPercentEncoding(q)));
+        if (q.isEmpty()) return;
+        // 메뉴바를 훑어 이름이 맞는 항목을 모은다 (하위 메뉴까지)
+        QVector<QPair<QString, QAction*>> hits;
+        std::function<void(QMenu*, const QString&)> walk = [&](QMenu* m, const QString& path) {
+            for (QAction* a : m->actions()) {
+                if (a->isSeparator()) continue;
+                const QString label = a->text();
+                if (a->menu()) {
+                    walk(a->menu(), path.isEmpty() ? label : path + " › " + label);
+                    continue;
+                }
+                if (!a->isEnabled() || label.isEmpty()) continue;
+                if (label.contains(q, Qt::CaseInsensitive) && hits.size() < 40)
+                    hits.push_back({path.isEmpty() ? label : path + " › " + label, a});
+            }
+        };
+        for (QAction* top : menuBar()->actions())
+            if (top->menu()) walk(top->menu(), top->text());
+        if (hits.isEmpty()) {
+            statusBar()->showMessage(QStringLiteral("\"%1\" 에 맞는 메뉴를 찾지 못했습니다.").arg(q), 4000);
+            return;
+        }
+        QMenu res(this);
+        QHash<QAction*, QAction*> back;
+        for (const auto& h : hits) {
+            QAction* item = res.addAction(h.first);
+            if (!h.second->shortcut().isEmpty())
+                item->setText(h.first + "    " + h.second->shortcut().toString(QKeySequence::NativeText));
+            back.insert(item, h.second);
+        }
+        QAction* picked = res.exec(helpSearch->mapToGlobal(QPoint(0, helpSearch->height())));
+        if (picked && back.contains(picked)) back.value(picked)->trigger();
     });
     tb->addWidget(helpSearch);
     syncClipTabs();
@@ -3496,6 +3699,14 @@ void MainWindow::projectSettingsDialog() {
     auto* stretch = new QCheckBox("프레임 속도를 바꿀 때 길이(초) 유지: 이미지 위치를 비율대로 옮김");
     form->addRow(stretch);
     form->addRow("프레임 수", frames);
+    // 색 공간: 내보내는 그림에 ICC 프로필로 붙는다
+    auto* cs = new QComboBox;
+    for (int i = 0; i < Document::colorSpaceCount(); ++i) cs->addItem(Document::colorSpaceName(i), i);
+    cs->setCurrentIndex(doc_->colorSpace());
+    cs->setToolTip(QStringLiteral(
+        "내보내는 PNG·JPG·TIFF 에 이 색 공간을 ICC 프로필로 붙입니다.\n"
+        "그림의 픽셀 값은 바꾸지 않고, 어떤 색 공간으로 읽어야 하는지만 적어 둡니다."));
+    form->addRow("색 공간 (ICC)", cs);
     auto* note = new QLabel("해상도를 바꾸면 실행 취소 기록이 지워집니다.");
     note->setStyleSheet("color:#a0a0a0;");
     form->addRow(note);
@@ -3512,6 +3723,7 @@ void MainWindow::projectSettingsDialog() {
         else doc_->setFps(fps->value());
     }
     if (frames->value() != doc_->frameCount() && !(stretch->isChecked() && fpsChanged)) doc_->setFrameCount(frames->value());
+    doc_->setColorSpace(cs->currentData().toInt());
     canvas_->zoomFit();
     updateInfo();
     statusBar()->showMessage(QString("프로젝트 설정 적용: %1 x %2, %3 fps, %4 프레임").arg(ns.width()).arg(ns.height()).arg(doc_->fps()).arg(doc_->frameCount()), 4000);
@@ -4022,7 +4234,7 @@ void MainWindow::gotoFrame(int f) {
     doc_->setCurrentFrame(f);
 }
 
-// 프레임을 옮길 때 그 자리의 소리를 짧게 들려준다 (TVPaint 의 sound scrub)
+// 프레임을 옮길 때 그 자리의 소리를 짧게 들려준다 (소리 스크럽)
 void MainWindow::scrubAudioAt(int frame) {
     if (!audioScrub_ || playTimer_.isActive()) return;
     if (!player_ || doc_->audioPath().isEmpty() || doc_->masterMuted()) return;
@@ -4130,12 +4342,13 @@ void MainWindow::updateInfo() {
     infoImage_->setText(QString("이미지 %1").arg(doc_->currentFrame() + 1));
     const QString projName = doc_->path().isEmpty() ? QStringLiteral("이름 없음") : QFileInfo(doc_->path()).completeBaseName();
     syncClipTabs();
-    canvasInfo_->setText(QString("프로젝트: \"%1\"  클립: \"%2\"  %3%  0°  현재 레이어: \"%4\"  현재 이미지: %5%6")
+    canvasInfo_->setText(QString("프로젝트: \"%1\"  클립: \"%2\"  %3%  %7°  현재 레이어: \"%4\"  현재 이미지: %5%6")
                              .arg(projName, clipNames_[clipIdx_])
                              .arg(canvas_->zoom() * 100.0, 0, 'f', 2)
                              .arg(doc_->layer(l).name)
                              .arg(doc_->currentFrame() + 1)
-                             .arg(doc_->path().isEmpty() ? QString() : QString("  (%1)").arg(QDir::toNativeSeparators(doc_->path()))));
+                             .arg(doc_->path().isEmpty() ? QString() : QString("  (%1)").arg(QDir::toNativeSeparators(doc_->path())))
+                             .arg(canvas_->viewAngle(), 0, 'f', 1));
     zoomLabel_->setText(QString("%1%").arg(canvas_->zoom() * 100.0, 0, 'f', 2));
 }
 

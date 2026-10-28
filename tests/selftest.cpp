@@ -3,12 +3,18 @@
 #include <QFileInfo>
 #include <QFile>
 #include <QPainter>
+#include <QColorSpace>
+#include <QSet>
+#include <QTableWidget>
 #include <QTemporaryDir>
 #include <QUndoStack>
 #include <QtTest/QtTest>
 
 #include "CanvasWidget.h"
+#include "Brush.h"
 #include "Document.h"
+#include "EditExport.h"
+#include "RenderQueue.h"
 #include "LipSync.h"
 #include "Effects.h"
 #include "Panels.h"
@@ -331,6 +337,75 @@ static QPoint imgToWidget(CanvasWidget* c, Document* d, QPoint p) {
     return QPoint((c->width() - d->size().width()) / 2 + p.x(), (c->height() - d->size().height()) / 2 + p.y());
 }
 
+// 캔버스 회전: 화면만 돌고 그림은 그대로이며, 돌린 상태에서 찍은 자리가 제자리에 들어간다
+static void testCanvasRotation(MainWindow& w) {
+    Document* d = w.document();
+    CanvasWidget* c = w.canvas();
+    d->newProject(QSize(120, 90), 3, 12);
+    c->zoomActual();
+    c->clearSelection();
+    c->resetViewAngle();
+    CHECK(c->viewAngle() == 0);
+
+    // 각도는 -180 ~ 180 으로 접힌다
+    c->setViewAngle(370);
+    CHECK(std::abs(c->viewAngle() - 10.0) < 1e-6);
+    c->setViewAngle(-190);
+    CHECK(std::abs(c->viewAngle() - 170.0) < 1e-6);
+    c->rotateView(15);
+    CHECK(std::abs(c->viewAngle() - (-175.0)) < 1e-6);
+    c->resetViewAngle();
+    CHECK(c->viewAngle() == 0);
+
+    // 돌리지 않았을 때 한가운데를 찍어 둔다
+    c->setTool(CanvasWidget::Tool::Pen);
+    c->setColorA(Qt::black);
+    const QPoint mid(c->width() / 2, c->height() / 2);
+    QTest::mouseClick(c, Qt::LeftButton, {}, mid);
+    const int k0 = d->keyIndexAt(0, 0);
+    CHECK(k0 >= 0);
+    const QImage flat = d->keyImage(0, k0);
+    // 그림 한가운데에 찍혔다
+    CHECK(qAlpha(flat.pixel(60, 45)) > 0);
+
+    // 90° 돌려도 화면 한가운데는 여전히 그림 한가운데다
+    d->newProject(QSize(120, 90), 3, 12);
+    c->zoomActual();
+    c->setViewAngle(90);
+    QTest::mouseClick(c, Qt::LeftButton, {}, mid);
+    const int k1 = d->keyIndexAt(0, 0);
+    CHECK(k1 >= 0);
+    CHECK(qAlpha(d->keyImage(0, k1).pixel(60, 45)) > 0);
+
+    // 돌린 채로 가장자리를 찍으면, 돌린 방향에 맞는 자리에 들어간다.
+    // 화면에서 한가운데보다 오른쪽 = 90° 돌아간 그림에서는 아래쪽이다.
+    d->newProject(QSize(120, 90), 3, 12);
+    c->zoomActual();
+    c->setViewAngle(90);
+    QTest::mouseClick(c, Qt::LeftButton, {}, mid + QPoint(20, 0));
+    const int k2 = d->keyIndexAt(0, 0);
+    CHECK(k2 >= 0);
+    {
+        const QImage im = d->keyImage(0, k2);
+        // 찍힌 점의 무게중심을 찾는다
+        double sx = 0, sy = 0, n = 0;
+        for (int y = 0; y < im.height(); ++y)
+            for (int x = 0; x < im.width(); ++x)
+                if (qAlpha(im.pixel(x, y)) > 0) { sx += x; sy += y; ++n; }
+        CHECK(n > 0);
+        const double cx = sx / n, cy = sy / n;
+        CHECK(std::abs(cx - 60.0) < 3.0);      // 가로로는 가운데 그대로
+        // 화면이 시계 방향으로 90° 돌아 있으면 그림의 위쪽이 화면 오른쪽을 향한다.
+        // 그래서 화면에서 오른쪽을 찍으면 그림에서는 위쪽에 찍힌다.
+        CHECK(cy < 45.0 - 10.0);
+    }
+
+    // 화면은 돌아가도 저장되는 그림은 돌지 않는다 (합성 결과 크기가 그대로)
+    CHECK(d->composite(0, true, false).size() == d->size());
+    c->resetViewAngle();
+    CHECK(c->viewAngle() == 0);
+}
+
 static void testResizeAndNext(MainWindow& w) {
     Document* d = w.document();
     d->newProject(QSize(200, 100), 4, 12);
@@ -433,6 +508,170 @@ static void testTimelineZoom() {
     t.grab().save("/tmp/demo/11_compact.png");
     t.setCompact(false);
     CHECK(t.sizeHint() == s0);
+}
+
+// 필압 조절: 무엇에 작용할지, 가장 약할 때의 값, 감도 곡선
+static void testPressureSettings() {
+    BrushParams p;
+    // 필압을 끄면 세기와 상관없이 그대로
+    p.pressure = false;
+    double sm = 0, om = 0;
+    pressureFactors(p, 0.0, &sm, &om);
+    CHECK(std::abs(sm - 1.0) < 1e-9 && std::abs(om - 1.0) < 1e-9);
+    pressureFactors(p, 1.0, &sm, &om);
+    CHECK(std::abs(sm - 1.0) < 1e-9 && std::abs(om - 1.0) < 1e-9);
+
+    // 켜면 0 에서 최소값, 1 에서 1 이 된다
+    p.pressure = true;
+    p.prMinSize = 20;
+    p.prMinOpacity = 10;
+    p.prCurve = 0;
+    pressureFactors(p, 0.0, &sm, &om);
+    CHECK(std::abs(sm - 0.20) < 1e-9 && std::abs(om - 0.10) < 1e-9);
+    pressureFactors(p, 1.0, &sm, &om);
+    CHECK(std::abs(sm - 1.0) < 1e-9 && std::abs(om - 1.0) < 1e-9);
+    pressureFactors(p, 0.5, &sm, &om);
+    CHECK(std::abs(sm - 0.60) < 1e-9 && std::abs(om - 0.55) < 1e-9);
+
+    // 굵기에만 / 진하기에만 작용시키기
+    p.prOpacity = false;
+    pressureFactors(p, 0.0, &sm, &om);
+    CHECK(sm < 0.21 && std::abs(om - 1.0) < 1e-9);
+    p.prOpacity = true;
+    p.prSize = false;
+    pressureFactors(p, 0.0, &sm, &om);
+    CHECK(std::abs(sm - 1.0) < 1e-9 && om < 0.11);
+    p.prSize = true;
+
+    // 최소 굵기 100% 면 필압이 굵기를 건드리지 않는다
+    p.prMinSize = 100;
+    pressureFactors(p, 0.0, &sm, &om);
+    CHECK(std::abs(sm - 1.0) < 1e-9);
+    p.prMinSize = 20;
+
+    // 감도: 0 은 그대로, 음수는 더 쉽게(값이 커짐), 양수는 더 힘들게(값이 작아짐)
+    CHECK(std::abs(pressureCurve(0, 0.5) - 0.5) < 1e-9);
+    CHECK(pressureCurve(-100, 0.5) > 0.5);
+    CHECK(pressureCurve(100, 0.5) < 0.5);
+    // 양 끝은 감도와 상관없이 그대로
+    for (int c : {-100, -50, 0, 50, 100}) {
+        CHECK(std::abs(pressureCurve(c, 0.0)) < 1e-9);
+        CHECK(std::abs(pressureCurve(c, 1.0) - 1.0) < 1e-9);
+    }
+    // 어떤 감도에서도 눌수록 커진다 (뒤집히지 않는다)
+    for (int c : {-100, -40, 0, 40, 100}) {
+        double prev = -1;
+        for (int i = 0; i <= 10; ++i) {
+            const double v = pressureCurve(c, i / 10.0);
+            CHECK(v >= prev - 1e-9);
+            prev = v;
+        }
+    }
+    // 범위를 벗어난 값도 안전하게 잘린다
+    CHECK(std::abs(pressureCurve(0, -5.0)) < 1e-9);
+    CHECK(std::abs(pressureCurve(0, 9.0) - 1.0) < 1e-9);
+    CHECK(std::abs(pressureCurve(9999, 1.0) - 1.0) < 1e-9);
+
+    // 실제로 그려 보면, 약하게 누른 쪽이 더 가늘고 옅다
+    auto strokeInk = [](double press, int minSize) {
+        BrushParams b;
+        b.pressure = true;
+        b.size = 24;
+        b.opacity = 100;
+        b.hardness = 90;
+        b.prMinSize = minSize;
+        b.prMinOpacity = 5;
+        QImage im(80, 80, QImage::Format_ARGB32_Premultiplied);
+        im.fill(Qt::transparent);
+        QRandomGenerator rng(1234u);
+        BrushDabCache cache;
+        brushStampAt(im, b, Qt::black, QPointF(40, 40), press, rng, cache);
+        qint64 ink = 0;
+        for (int y = 0; y < im.height(); ++y)
+            for (int x = 0; x < im.width(); ++x) ink += qAlpha(im.pixel(x, y));
+        return ink;
+    };
+    const qint64 light = strokeInk(0.15, 15), heavy = strokeInk(1.0, 15);
+    CHECK(light > 0 && heavy > light * 3);
+    // 최소 굵기를 올리면 약하게 눌러도 두꺼워진다
+    CHECK(strokeInk(0.15, 80) > light * 2);
+}
+
+// 애니메이션 브러시: 그림 여러 장을 묶어 찍을 때마다 다음 장이 나온다
+static void testAnimBrush() {
+    clearCustomBrushes();
+    CHECK(customBrushCount() == 0);
+
+    auto mk = [](Qt::GlobalColor c, int w) {
+        QImage im(w, w, QImage::Format_ARGB32_Premultiplied);
+        im.fill(Qt::transparent);
+        QPainter p(&im);
+        p.fillRect(QRect(0, 0, w, w), QColor(c));
+        p.end();
+        return im;
+    };
+    // 한 장짜리 브러시는 장 수가 1
+    const int one = addCustomBrush(QStringLiteral("한장"), mk(Qt::black, 20));
+    CHECK(one == 0 && customBrushFrameCount(one) == 1);
+    CHECK(!customBrushImage(one).isNull());
+
+    // 세 장짜리 애니메이션 브러시
+    QVector<QImage> frames{mk(Qt::black, 20), mk(Qt::black, 30), mk(Qt::black, 40)};
+    const int anim = addAnimBrush(QStringLiteral("세장"), frames);
+    CHECK(anim == 1 && customBrushFrameCount(anim) == 3);
+    CHECK(customBrushName(anim) == QStringLiteral("세장"));
+    // 장마다 크기가 다르다
+    CHECK(customBrushFrame(anim, 0).width() == 20);
+    CHECK(customBrushFrame(anim, 1).width() == 30);
+    CHECK(customBrushFrame(anim, 2).width() == 40);
+    // 범위를 벗어나면 가장자리로 잘린다
+    CHECK(customBrushFrame(anim, -5).width() == 20);
+    CHECK(customBrushFrame(anim, 99).width() == 40);
+    CHECK(customBrushImage(anim).width() == 20);   // 첫 장
+    // 빈 목록은 거절
+    CHECK(addAnimBrush(QStringLiteral("빈것"), {}) < 0);
+    CHECK(addAnimBrush(QStringLiteral("널"), QVector<QImage>{QImage()}) < 0);
+
+    // 차례대로: 찍을 때마다 쓰는 장이 바뀐다
+    BrushParams bp;
+    bp.customBrush = anim;
+    bp.animMode = 0;
+    bp.size = 24;
+    bp.opacity = 100;
+    QRandomGenerator rng(7u);
+    BrushDabCache cache;
+    QImage buf(80, 80, QImage::Format_ARGB32_Premultiplied);
+    QVector<int> used;
+    for (int i = 0; i < 6; ++i) {
+        buf.fill(Qt::transparent);
+        brushStampAt(buf, bp, Qt::black, QPointF(40, 40), 1.0, rng, cache);
+        used.push_back(cache.customFrame);
+    }
+    CHECK(used == QVector<int>({0, 1, 2, 0, 1, 2}));
+
+    // 무작위: 모두 범위 안이고, 여러 번 찍으면 한 장만 나오지는 않는다
+    bp.animMode = 1;
+    BrushDabCache cache2;
+    QSet<int> seen;
+    for (int i = 0; i < 60; ++i) {
+        buf.fill(Qt::transparent);
+        brushStampAt(buf, bp, Qt::black, QPointF(40, 40), 1.0, rng, cache2);
+        CHECK(cache2.customFrame >= 0 && cache2.customFrame < 3);
+        seen.insert(cache2.customFrame);
+    }
+    CHECK(seen.size() >= 2);
+
+    // 한 장짜리 브러시는 장이 바뀌지 않는다
+    bp.customBrush = one;
+    bp.animMode = 0;
+    BrushDabCache cache3;
+    for (int i = 0; i < 4; ++i) {
+        buf.fill(Qt::transparent);
+        brushStampAt(buf, bp, Qt::black, QPointF(40, 40), 1.0, rng, cache3);
+        CHECK(cache3.customFrame == 0);
+    }
+    clearCustomBrushes();
+    CHECK(customBrushCount() == 0 && customBrushFrameCount(0) == 0);
 }
 
 static void testTiltAndCustomBrush(MainWindow& w) {
@@ -831,6 +1070,339 @@ static void testRepeat() {
     e.repeatKeys(0, 0, 2, 2, true);
     auto u = [&](int f) { return e.layer(0).frames[f].isNull() ? -1 : qRed(e.layer(0).frames[f].pixel(0, 0)); };
     CHECK(u(3) == 20 && u(4) == 10 && u(6) == 10 && u(8) == 20); // 첫 반복은 거꾸로, 둘째는 원래 순서
+}
+
+// 멀티플레인: 레이어마다 카메라를 따라가는 정도가 다르면 시차가 생긴다
+// 색 공간(ICC): 내보내는 그림에 프로필이 붙고, 프로젝트에 저장된다
+// 편집용 내보내기: 타임코드·컷 나누기·EDL·XML
+// 자동 채색: 한 장 칠하기와 여러 프레임 일괄 칠하기
+// 배치 렌더: 작업 목록이 쌓이고, 상태 글이 바뀌고, 창을 닫아도 남는다
+static void testRenderQueue(MainWindow& w) {
+    auto& js = RenderQueueDialog::jobs();
+    js.clear();
+    CHECK(js.isEmpty());
+
+    RenderJob a;
+    a.name = QStringLiteral("미리보기");
+    a.outPath = QStringLiteral("/tmp/a.mp4");
+    a.opt.format = "mp4";
+    a.opt.from = 0;
+    a.opt.to = 9;
+    a.opt.scalePercent = 50;
+    js.push_back(a);
+
+    RenderJob b;
+    b.name = QStringLiteral("본편");
+    b.outPath = QStringLiteral("/tmp/b");
+    b.opt.format = "png";
+    b.opt.from = 0;
+    b.opt.to = -1;
+    js.push_back(b);
+    CHECK(js.size() == 2);
+
+    // 상태 글
+    CHECK(js[0].stateText() == QStringLiteral("기다림"));
+    js[0].state = 1;
+    CHECK(js[0].stateText() == QStringLiteral("하는 중"));
+    js[0].state = 2;
+    CHECK(js[0].stateText() == QStringLiteral("끝남"));
+    js[0].state = 4;
+    CHECK(js[0].stateText() == QStringLiteral("건너뜀"));
+    js[0].state = 3;
+    js[0].error = QStringLiteral("ffmpeg 없음");
+    CHECK(js[0].stateText().contains(QStringLiteral("ffmpeg 없음")));
+    js[0].state = 0;
+    js[0].error.clear();
+
+    // 창을 띄워도 목록이 그대로다 (실행은 하지 않는다)
+    {
+        RenderQueueDialog dlg(w.document());
+        CHECK(RenderQueueDialog::jobs().size() == 2);
+        auto* table = dlg.findChild<QTableWidget*>();
+        CHECK(table != nullptr);
+        CHECK(table->rowCount() == 2);
+        CHECK(table->item(0, 0) && table->item(0, 0)->text() == QStringLiteral("미리보기"));
+        CHECK(table->item(1, 0) && table->item(1, 0)->text() == QStringLiteral("본편"));
+        // 범위: to 가 -1 이면 프로젝트 끝까지로 보여 준다
+        CHECK(table->item(0, 2) && table->item(0, 2)->text() == QStringLiteral("1 – 10"));
+        CHECK(table->item(1, 2) &&
+              table->item(1, 2)->text() == QString("1 – %1").arg(w.document()->frameCount()));
+        CHECK(table->item(0, 3) && table->item(0, 3)->text() == QStringLiteral("50%"));
+        CHECK(table->item(0, 5) && table->item(0, 5)->text() == QStringLiteral("기다림"));
+    }
+    // 창을 닫아도 남는다
+    CHECK(RenderQueueDialog::jobs().size() == 2);
+    RenderQueueDialog::jobs().clear();
+}
+
+static void testBatchFill() {
+    // 가운데가 뚫린 네모를 그려 두고 안쪽을 칠한다
+    auto lineArt = [] {
+        QImage im(40, 40, QImage::Format_ARGB32_Premultiplied);
+        im.fill(Qt::transparent);
+        QPainter p(&im);
+        p.setPen(QPen(Qt::black, 2));
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRect(8, 8, 24, 24));
+        p.end();
+        return im;
+    };
+    // 한 장 칠하기
+    QImage one = lineArt();
+    CHECK(qAlpha(one.pixel(20, 20)) == 0);                  // 처음에는 비어 있다
+    const int painted = Document::floodFill(one, QPoint(20, 20), Qt::red);
+    CHECK(painted > 100);
+    CHECK(qRed(one.pixel(20, 20)) == 255 && qGreen(one.pixel(20, 20)) == 0);
+    CHECK(qAlpha(one.pixel(2, 2)) == 0);                    // 선 밖으로는 새지 않는다
+    // 같은 색으로 또 칠하면 할 일이 없다
+    CHECK(Document::floodFill(one, QPoint(20, 20), Qt::red) == 0);
+    // 그림 밖은 거절
+    CHECK(Document::floodFill(one, QPoint(-1, 5), Qt::blue) == 0);
+    CHECK(Document::floodFill(one, QPoint(999, 5), Qt::blue) == 0);
+    QImage nul;
+    CHECK(Document::floodFill(nul, QPoint(0, 0), Qt::blue) == 0);
+
+    Document d;
+    d.newProject(QSize(40, 40), 6, 12);
+    // 0,1,2,4 번에만 그림을 둔다 (3,5 는 홀드)
+    for (int f : {0, 1, 2, 4}) d.pushKeyEdit(0, f, QImage(), lineArt(), "art");
+
+    // 칠한 자리를 적어 둔다
+    CHECK(d.fillMarks().isEmpty());
+    d.recordFill(QPoint(20, 20), Qt::green);
+    CHECK(d.fillMarks().size() == 1);
+
+    const int n = d.batchFill(0, 0, 5, d.fillMarks());
+    CHECK(n == 4);                                          // 그림이 있는 네 장만
+    for (int f : {0, 1, 2, 4}) {
+        const QImage im = d.keyImage(0, f);
+        CHECK(!im.isNull());
+        CHECK(qGreen(im.pixel(20, 20)) == 255 && qRed(im.pixel(20, 20)) == 0);
+    }
+    CHECK(d.keyImage(0, 3).isNull() && d.keyImage(0, 5).isNull());   // 홀드 칸은 그대로
+
+    // 되돌리기 한 번으로 전부 되돌아간다
+    CHECK(d.undoStack()->canUndo());
+    d.undoStack()->undo();
+    for (int f : {0, 1, 2, 4}) CHECK(qAlpha(d.keyImage(0, f).pixel(20, 20)) == 0);
+
+    // 잠긴 레이어는 칠하지 않는다
+    d.layer(0).locked = true;
+    CHECK(d.batchFill(0, 0, 5, d.fillMarks()) == 0);
+    d.layer(0).locked = false;
+    // 칠할 자리가 없으면 아무 것도 안 한다
+    CHECK(d.batchFill(0, 0, 5, {}) == 0);
+    // 없는 레이어
+    CHECK(d.batchFill(99, 0, 5, d.fillMarks()) == 0);
+    // 시작과 끝이 뒤집혀 있어도 알아서 바로잡는다
+    CHECK(d.batchFill(0, 5, 0, d.fillMarks()) == 4);
+    // 기억 지우기
+    d.clearFillMarks();
+    CHECK(d.fillMarks().isEmpty());
+}
+
+static void testEditExport() {
+    // 타임코드
+    CHECK(EditExport::timecode(0, 24) == QStringLiteral("00:00:00:00"));
+    CHECK(EditExport::timecode(23, 24) == QStringLiteral("00:00:00:23"));
+    CHECK(EditExport::timecode(24, 24) == QStringLiteral("00:00:01:00"));
+    CHECK(EditExport::timecode(24 * 60, 24) == QStringLiteral("00:01:00:00"));
+    CHECK(EditExport::timecode(24 * 3600, 24) == QStringLiteral("01:00:00:00"));
+    CHECK(EditExport::timecode(-5, 24) == QStringLiteral("00:00:00:00"));   // 음수는 0 으로
+    CHECK(EditExport::timecode(10, 0) == QStringLiteral("00:00:10:00"));    // fps 0 은 1 로 본다
+
+    Document d;
+    d.newProject(QSize(64, 48), 100, 25);
+
+    // 북마크가 없으면 전체가 한 컷
+    QVector<EditExport::Cut> cuts = EditExport::cutsOf(&d);
+    CHECK(cuts.size() == 1);
+    CHECK(cuts[0].from == 0 && cuts[0].to == 99 && cuts[0].frames() == 100);
+
+    // 북마크로 컷이 나뉜다
+    d.toggleBookmark(25);
+    d.toggleBookmark(60);
+    cuts = EditExport::cutsOf(&d);
+    CHECK(cuts.size() == 3);
+    CHECK(cuts[0].from == 0 && cuts[0].to == 24);
+    CHECK(cuts[1].from == 25 && cuts[1].to == 59);
+    CHECK(cuts[2].from == 60 && cuts[2].to == 99);
+    // 컷 길이를 모두 더하면 전체 길이
+    int sum = 0;
+    for (const auto& c : cuts) sum += c.frames();
+    CHECK(sum == 100);
+    // 이름은 기본으로 "컷 N"
+    CHECK(cuts[0].name == QStringLiteral("컷 1"));
+    // 메모를 달면 그 이름이 쓰인다
+    d.setNote(25, QStringLiteral("주인공 등장"));
+    cuts = EditExport::cutsOf(&d);
+    CHECK(cuts[1].name == QStringLiteral("주인공 등장"));
+
+    // EDL
+    const QString edl = EditExport::buildEdl(&d, QStringLiteral("내 작품"), QStringLiteral("ony reel!"));
+    CHECK(edl.startsWith(QStringLiteral("TITLE: 내 작품")));
+    CHECK(edl.contains(QStringLiteral("FCM: NON-DROP FRAME")));
+    CHECK(edl.contains(QStringLiteral("주인공 등장")));
+    CHECK(edl.contains(QStringLiteral("ONYREEL")));      // 릴 이름은 영숫자 8글자 대문자
+    CHECK(!edl.contains(QStringLiteral("ony reel!")));
+    CHECK(edl.contains(QStringLiteral("001")) && edl.contains(QStringLiteral("003")));
+    // 25fps 에서 25번 프레임은 1초
+    CHECK(edl.contains(QStringLiteral("00:00:01:00")));
+
+    // XML
+    const QString xml = EditExport::buildFcpXml(&d, QStringLiteral("내 <작품>"), QStringLiteral("/tmp/a.mov"));
+    CHECK(xml.startsWith(QStringLiteral("<?xml")));
+    CHECK(xml.contains(QStringLiteral("<xmeml version=\"5\">")));
+    CHECK(xml.contains(QStringLiteral("<timebase>25</timebase>")));
+    CHECK(xml.contains(QStringLiteral("<width>64</width>")));
+    CHECK(xml.contains(QStringLiteral("내 &lt;작품&gt;")));    // 꺾쇠는 빠져나가게 바뀐다
+    CHECK(!xml.contains(QStringLiteral("<name>내 <작품></name>")));
+    CHECK(xml.contains(QStringLiteral("a.mov")));
+    CHECK(xml.count(QStringLiteral("<clipitem")) == 3);
+    CHECK(xml.count(QStringLiteral("<marker>")) == 3);
+    CHECK(xml.trimmed().endsWith(QStringLiteral("</xmeml>")));
+
+    // 파일로 쓰기
+    QTemporaryDir tmp;
+    CHECK(tmp.isValid());
+    const QString pe = tmp.filePath("a.edl"), px = tmp.filePath("a.xml");
+    CHECK(EditExport::writeEdl(&d, pe, QStringLiteral("T")).isEmpty());
+    CHECK(EditExport::writeFcpXml(&d, px, QStringLiteral("T"), QString()).isEmpty());
+    CHECK(QFileInfo(pe).size() > 0 && QFileInfo(px).size() > 0);
+    // 못 쓰는 자리면 사유를 돌려준다
+    CHECK(!EditExport::writeEdl(&d, tmp.filePath("없는폴더/a.edl"), QStringLiteral("T")).isEmpty());
+    CHECK(!EditExport::writeEdl(nullptr, pe, QStringLiteral("T")).isEmpty());
+}
+
+static void testColorSpace() {
+    Document d;
+    d.newProject(QSize(40, 30), 2, 12);
+    CHECK(Document::colorSpaceCount() == 5);
+    for (int i = 0; i < Document::colorSpaceCount(); ++i) CHECK(!Document::colorSpaceName(i).isEmpty());
+    CHECK(d.colorSpace() == 0);   // 기본은 sRGB
+
+    QTemporaryDir tmp;
+    CHECK(tmp.isValid());
+    // sRGB 로 내보내면 프로필이 붙는다
+    const QString p0 = tmp.filePath("srgb.png");
+    CHECK(d.exportFrame(0, p0));
+    {
+        QImage im(p0);
+        CHECK(!im.isNull());
+        CHECK(im.colorSpace().isValid());
+    }
+    // Display P3 로 바꾸면 다른 프로필이 붙는다
+    d.setColorSpace(1);
+    CHECK(d.colorSpace() == 1);
+    const QString p1 = tmp.filePath("p3.png");
+    CHECK(d.exportFrame(0, p1));
+    {
+        QImage a(p0), b(p1);
+        CHECK(a.colorSpace().isValid() && b.colorSpace().isValid());
+        CHECK(a.colorSpace() != b.colorSpace());
+    }
+    // "붙이지 않음" 이면 프로필이 없다
+    d.setColorSpace(4);
+    const QString p2 = tmp.filePath("none.png");
+    CHECK(d.exportFrame(0, p2));
+    {
+        QImage im(p2);
+        CHECK(!im.isNull());
+        CHECK(!im.colorSpace().isValid());
+    }
+    // 범위를 벗어난 값은 잘린다
+    d.setColorSpace(99);
+    CHECK(d.colorSpace() == Document::colorSpaceCount() - 1);
+    d.setColorSpace(-3);
+    CHECK(d.colorSpace() == 0);
+
+    // 그림의 픽셀은 건드리지 않는다
+    d.setColorSpace(2);
+    QImage out = d.composite(0, true, false);
+    const QRgb before = out.pixel(5, 5);
+    d.tagColorSpace(out);
+    CHECK(out.pixel(5, 5) == before);
+
+    // 저장했다 열면 남아 있다
+    const QString proj = tmp.filePath("cs.ony");
+    CHECK(d.save(proj));
+    Document e;
+    CHECK(e.load(proj));
+    CHECK(e.colorSpace() == 2);
+}
+
+static void testMultiplane() {
+    Document d;
+    d.newProject(QSize(100, 100), 4, 12);
+    d.addLayer("앞");
+    // 두 레이어에 같은 자리의 점을 찍는다
+    auto dot = [&](int l) {
+        QImage im(100, 100, QImage::Format_ARGB32_Premultiplied);
+        im.fill(Qt::transparent);
+        QPainter p(&im);
+        p.fillRect(QRect(48, 48, 4, 4), Qt::black);
+        p.end();
+        d.pushKeyEdit(l, 0, QImage(), im, "dot");
+    };
+    dot(0);
+    dot(1);
+    // 카메라를 오른쪽으로 크게 민다
+    d.setCameraEnabled(true);
+    CameraKey k;
+    k.x = 30;
+    d.setCameraKey(0, k);
+
+    // 따라가기가 모두 100 이면 멀티플레인이 아니다 (예전 길 그대로)
+    CHECK(!d.hasMultiplane());
+    const QImage flat = d.composite(0, true, true);
+
+    // 한 레이어만 50% 로 두면 멀티플레인이 된다
+    d.layer(0).camFollow = 50;
+    CHECK(d.hasMultiplane());
+    const QImage para = d.composite(0, true, true);
+    CHECK(para.size() == d.size());
+    CHECK(para != flat);   // 시차가 생겨 그림이 달라진다
+
+    // 점이 몇 개 보이는지로 확인: 따라가기가 다르면 두 점이 갈라진다
+    auto blobCenters = [](const QImage& im) {
+        QVector<double> xs;
+        for (int x = 0; x < im.width(); ++x) {
+            bool any = false;
+            for (int y = 0; y < im.height(); ++y)
+                if (qGray(im.pixel(x, y)) < 128) { any = true; break; }
+            if (any) xs.push_back(x);
+        }
+        return xs;
+    };
+    const QVector<double> cFlat = blobCenters(flat), cPara = blobCenters(para);
+    CHECK(!cFlat.isEmpty() && !cPara.isEmpty());
+    // 같이 움직이면 폭이 좁고(한 덩어리), 갈라지면 폭이 넓어진다
+    const double wFlat = cFlat.last() - cFlat.first(), wPara = cPara.last() - cPara.first();
+    CHECK(wPara > wFlat + 5);
+
+    // 따라가기 비율대로 카메라 값이 약해진다
+    const CameraKey half = d.cameraAtFollow(0, 50);
+    CHECK(std::abs(half.x - 15.0) < 1e-6);
+    const CameraKey none = d.cameraAtFollow(0, 0);
+    CHECK(std::abs(none.x) < 1e-6);
+    const CameraKey same = d.cameraAtFollow(0, 100);
+    CHECK(std::abs(same.x - 30.0) < 1e-6);
+    // 배율도 1 을 기준으로 약해진다
+    CameraKey z;
+    z.scale = 2.0;
+    d.setCameraKey(0, z);
+    CHECK(std::abs(d.cameraAtFollow(0, 50).scale - 1.5) < 1e-6);
+    CHECK(std::abs(d.cameraAtFollow(0, 0).scale - 1.0) < 1e-6);
+
+    // 저장했다가 열어도 따라가기 값이 남는다
+    QTemporaryDir tmp;
+    CHECK(tmp.isValid());
+    const QString path = tmp.filePath("mp.ony");
+    CHECK(d.save(path));
+    Document e;
+    CHECK(e.load(path));
+    CHECK(e.layer(0).camFollow == 50);
+    CHECK(e.layer(1).camFollow == 100);
 }
 
 static void testCameraEase() {
@@ -1448,8 +2020,8 @@ static void testVectorLayer(MainWindow& w) {
     CHECK(d->vectorStrokeCount(0, 0) == 0);
 }
 
-// George(TVPaint 스크립트) 호환 부분: 수학 함수, do…until, tv_ 이름, $result
-static void testGeorgeScript(MainWindow& w) {
+// 스크립트 확장: 수학 함수, do…until, 긴 이름(ony_…), $result
+static void testLongNameScript(MainWindow& w) {
     Document* d = w.document();
     d->newProject(QSize(60, 40), 8, 12);
     ScriptEngine e(d);
@@ -1478,23 +2050,23 @@ static void testGeorgeScript(MainWindow& w) {
     e.run("set k = 0\nif 1\ndo\nset k = $k + 1\nuntil $k >= 3\nend\nset k = $k + 100");
     CHECK(std::abs(e.var("k") - 103) < 1e-9);
 
-    // tv_ 이름과 따옴표
+    // 긴 이름과 따옴표
     const int before = d->layerCount();
-    e.run("tv_LayerCreate \"배경 레이어\"");
+    e.run("ony_LayerCreate \"배경 레이어\"");
     CHECK(d->layerCount() == before + 1);
     CHECK(d->layer(d->currentLayer()).name.contains(QStringLiteral("배경 레이어")));
-    e.run("TV_LayerImage 5");                          // 대소문자를 가리지 않는다
+    e.run("ONY_GotoFrame 5");                          // 대소문자를 가리지 않는다
     CHECK(d->currentFrame() == 4);
-    e.run("tv_FrameRate 12");
+    e.run("ony_FrameRate 12");
     CHECK(d->fps() == 12);
-    e.run("tv_ClearLayer");                            // 이름만 바뀌고 동작은 clear 와 같다
+    e.run("ony_LayerClear");                           // 이름만 바뀌고 동작은 clear 와 같다
 
     // $result: 바로 앞 명령의 결과
-    const QString log = e.run("tv_Version\necho 앞 결과는 $result");
+    const QString log = e.run("ony_Version\necho 앞 결과는 $result");
     CHECK(log.contains(QStringLiteral("앞 결과는 ONY")));
 
-    // 모르는 tv_ 명령은 조용히 넘어가지 않고 알려 준다
-    const QString bad = e.run("tv_NoSuchCommand 1 2");
+    // 모르는 ony_ 명령은 조용히 넘어가지 않고 알려 준다
+    const QString bad = e.run("ony_NoSuchCommand 1 2");
     CHECK(bad.contains(QStringLiteral("알 수 없는 명령")));
 }
 
@@ -2393,7 +2965,7 @@ static void testCanvas(MainWindow& w) {
     CHECK(d->undoStack()->count() == cnt);
     d->layer(0).locked = false;
 
-    // 마지막 이미지 뒤의 프레임에 그리면 그 자리에 새 이미지가 생긴다 (TVPaint 방식)
+    // 마지막 이미지 뒤의 프레임에 그리면 그 자리에 새 이미지가 생긴다
     d->setCurrentFrame(5);
     QTest::mouseClick(c, Qt::LeftButton, {}, imgToWidget(c, d, {5, 5}));
     CHECK(d->keyIndexAt(0, 5) == 5);
@@ -2424,6 +2996,7 @@ int main(int argc, char** argv) {
     w.show();
     QTest::qWait(200);
     testClipsAndPlay(w);
+    testCanvasRotation(w);
     testResizeAndNext(w);
     testSequenceExport();
     testLightTable();
@@ -2432,12 +3005,19 @@ int main(int argc, char** argv) {
     testShortcuts(w);
     testPuppet();
     testTimelineZoom();
+    testPressureSettings();
+    testAnimBrush();
     testTiltAndCustomBrush(w);
     testCutDashBrush();
     testFxCategories(w);
     testImageMenu();
     testRepeat();
     testStretch();
+    testRenderQueue(w);
+    testBatchFill();
+    testEditExport();
+    testColorSpace();
+    testMultiplane();
     testCameraEase();
     { // 클립이 많아져도 검색창이 밀리지 않고, 오른쪽 패널을 넓게 끌 수 있다
         QAction* newClipAct = nullptr;
@@ -2445,8 +3025,7 @@ int main(int argc, char** argv) {
         CHECK(newClipAct != nullptr);
         for (int i = 0; newClipAct && i < 25; ++i) newClipAct->trigger();
         QTest::qWait(100);
-        QLineEdit* search = nullptr;
-        for (auto* le : w.findChildren<QLineEdit*>()) if (le->placeholderText().contains("매뉴얼")) search = le;
+        QLineEdit* search = w.findChild<QLineEdit*>(QStringLiteral("menuSearch"));
         CHECK(search && search->isVisible());
         if (search) CHECK(search->mapTo(&w, QPoint(search->width(), 0)).x() <= w.width());
         QDockWidget* brush = nullptr;
@@ -2477,7 +3056,7 @@ int main(int argc, char** argv) {
     testInbetween();
     testVectorLayer(w);
     testScriptEngine(w);
-    testGeorgeScript(w);
+    testLongNameScript(w);
     testLibraryAndPanel();
     testDemo5Basics(w);
     testPsdRoundTrip();

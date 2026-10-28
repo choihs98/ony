@@ -25,7 +25,7 @@ enum class Type {
     Pixelate, Emboss, Edge, Outline, Sharpen,
     // 색 보정 (파라미터가 많아 FX 스택에는 세기 하나로만 들어간다)
     Curves, Levels,
-    // 데모6: TVPaint 의 FX 목록을 참고해 넓힌 효과들
+    // 데모6: 효과 모음
     RadialBlur, SpinBlur,                                  // 블러
     Solarize, BlackWhite, ColorRange, Lumix,               // 색
     Lens, Ripple,                                          // 왜곡

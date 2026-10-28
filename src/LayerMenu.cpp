@@ -53,6 +53,43 @@ void populate(QMenu* m, Document* doc, const std::function<int()>& layerFn, cons
             });
         }
     }
+    // ---- 멀티플레인: 카메라를 얼마나 따라갈지 ----
+    {
+        QMenu* mp = m->addMenu("멀티플레인 (카메라 따라가기)");
+        struct Preset { const char* name; int pct; };
+        static const Preset presets[] = {
+            {"먼 배경 (25%)", 25}, {"배경 (50%)", 50}, {"중간 (75%)", 75},
+            {"기준면 (100%)", 100}, {"앞쪽 (150%)", 150}, {"맨 앞 (200%)", 200}, {"고정 (0%)", 0}};
+        auto* grp = new QActionGroup(mp);
+        QVector<QAction*> acts;
+        for (const Preset& pr : presets) {
+            QAction* a = mp->addAction(QString::fromUtf8(pr.name));
+            a->setCheckable(true);
+            grp->addAction(a);
+            acts.push_back(a);
+            const int pct = pr.pct;
+            QObject::connect(a, &QAction::triggered, mp, [=] {
+                L().camFollow = pct;
+                changed();
+            });
+        }
+        mp->addSeparator();
+        QAction* custom = mp->addAction("직접 넣기...");
+        QObject::connect(custom, &QAction::triggered, mp, [=] {
+            bool ok = false;
+            const int v = QInputDialog::getInt(nullptr, QStringLiteral("카메라 따라가기"),
+                                               QStringLiteral("0 ~ 400 %  (100 = 카메라와 똑같이)"),
+                                               L().camFollow, 0, 400, 5, &ok);
+            if (!ok) return;
+            L().camFollow = v;
+            changed();
+        });
+        QObject::connect(mp, &QMenu::aboutToShow, mp, [acts, L] {
+            static const int vals[] = {25, 50, 75, 100, 150, 200, 0};
+            for (int i = 0; i < acts.size(); ++i) acts[i]->setChecked(L().camFollow == vals[i]);
+        });
+    }
+
     QAction* endHere = m->addAction("현재 프레임에서 레이어 끝내기");
     QObject::connect(endHere, &QAction::triggered, m, [=] {
         L().endFrame = frameFn() + 1;

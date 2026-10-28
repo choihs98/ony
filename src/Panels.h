@@ -96,6 +96,19 @@ private:
 };
 
 // 도구 패널: 브러시 아이콘 + 크기/불투명도/경도/필압
+// 필압 설정 미리 보기: 왼쪽(살짝)에서 오른쪽(꾹)까지 눌렀을 때 획이 어떻게 나오는지 보여 준다
+class PressurePreview : public QWidget {
+    Q_OBJECT
+public:
+    explicit PressurePreview(QWidget* parent = nullptr);
+    void setParams(const BrushParams& p);
+    QSize sizeHint() const override { return QSize(180, 40); }
+protected:
+    void paintEvent(QPaintEvent*) override;
+private:
+    BrushParams p_;
+};
+
 class ToolPanel : public QWidget {
     Q_OBJECT
 public:
@@ -117,11 +130,23 @@ private:
     QSlider* opacity_;
     QSlider* hardness_;
     QCheckBox* pressure_;
+    // 필압 조절
+    class QWidget* prBox_ = nullptr;
+    QCheckBox* prSize_ = nullptr;
+    QCheckBox* prOpacity_ = nullptr;
+    QSlider* prMinSize_ = nullptr;
+    QSpinBox* prMinSizeV_ = nullptr;
+    QSlider* prMinOp_ = nullptr;
+    QSpinBox* prMinOpV_ = nullptr;
+    QSlider* prCurve_ = nullptr;
+    QSpinBox* prCurveV_ = nullptr;
+    class PressurePreview* prPreview_ = nullptr;
     QCheckBox* tilt_ = nullptr;
     QSlider* smooth_ = nullptr;
     QSpinBox* smoothV_ = nullptr;
     class QLabel* smoothLabel_ = nullptr;
     class QComboBox* customRow_ = nullptr;
+    class QComboBox* animMode_ = nullptr;
     QSpinBox* sizeV_;
     QSpinBox* opacityV_;
     QSpinBox* hardnessV_;

@@ -16,7 +16,8 @@ endif()
 find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia)
 find_package(Qt6 OPTIONAL_COMPONENTS Test PrintSupport)
 
-add_library(tvpcore STATIC
+add_library(onycore STATIC
+    src/EditExport.cpp
     src/LipSync.cpp
     src/Document.h src/Document.cpp
     src/Effects.h src/Effects.cpp
@@ -31,11 +32,11 @@ add_library(tvpcore STATIC
     src/Plugins.h src/Plugins.cpp
     src/Collab.h src/Collab.cpp
 )
-target_include_directories(tvpcore PUBLIC src)
-target_link_libraries(tvpcore PUBLIC Qt6::Widgets)
+target_include_directories(onycore PUBLIC src)
+target_link_libraries(onycore PUBLIC Qt6::Widgets)
 if(TARGET Qt6::PrintSupport)
-    target_link_libraries(tvpcore PUBLIC Qt6::PrintSupport)
-    target_compile_definitions(tvpcore PUBLIC ONY_HAS_PRINT)
+    target_link_libraries(onycore PUBLIC Qt6::PrintSupport)
+    target_compile_definitions(onycore PUBLIC ONY_HAS_PRINT)
 endif()
 
 set(UI_SOURCES
@@ -48,6 +49,7 @@ set(UI_SOURCES
     src/Shortcuts.h src/Shortcuts.cpp
     src/Privacy.h src/Privacy.cpp
     src/CurvesDialog.h src/CurvesDialog.cpp
+    src/RenderQueue.h src/RenderQueue.cpp
 )
 
 # 로고 (resources/ony.png, resources/ony.ico) — 있으면 자동으로 포함
@@ -66,12 +68,12 @@ if(WIN32 AND EXISTS ${CMAKE_SOURCE_DIR}/resources/ony.ico)
 endif()
 
 add_executable(ony src/main.cpp ${UI_SOURCES} ${ONY_EXTRA_SOURCES})
-target_link_libraries(ony PRIVATE tvpcore Qt6::Multimedia)
+target_link_libraries(ony PRIVATE onycore Qt6::Multimedia)
 
 # 자체 테스트 (오프스크린) — Qt Test 가 있을 때만
 if(TARGET Qt6::Test)
     add_executable(selftest tests/selftest.cpp ${UI_SOURCES})
-    target_link_libraries(selftest PRIVATE tvpcore Qt6::Multimedia Qt6::Test)
+    target_link_libraries(selftest PRIVATE onycore Qt6::Multimedia Qt6::Test)
 endif()
 
 if(WIN32)
@@ -80,10 +82,10 @@ endif()
 
 if(TARGET Qt6::Test)
     add_executable(demo tests/demo.cpp ${UI_SOURCES})
-    target_link_libraries(demo PRIVATE tvpcore Qt6::Multimedia Qt6::Test)
+    target_link_libraries(demo PRIVATE onycore Qt6::Multimedia Qt6::Test)
 endif()
 
 if(TARGET Qt6::Test AND EXISTS ${CMAKE_SOURCE_DIR}/tests/bench.cpp)
     add_executable(bench tests/bench.cpp ${UI_SOURCES})
-    target_link_libraries(bench PRIVATE tvpcore Qt6::Multimedia Qt6::Test)
+    target_link_libraries(bench PRIVATE onycore Qt6::Multimedia Qt6::Test)
 endif()
