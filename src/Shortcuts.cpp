@@ -23,6 +23,7 @@ static QString cleanLabel(QString s) {
     return s;
 }
 
+// 생성자: 저장된 단축키 재정의 값을 설정에서 불러온다
 Shortcuts::Shortcuts() {
     QSettings st("Ony", "Ony");
     st.beginGroup("shortcuts");
@@ -33,16 +34,19 @@ Shortcuts::Shortcuts() {
     }
 }
 
+// 단축키 관리자(싱글턴 인스턴스)를 가져온다
 Shortcuts& Shortcuts::instance() {
     static Shortcuts s;
     return s;
 }
 
+// 현재 단축키 값을 실제 액션(QAction)에 적용한다
 void Shortcuts::applyTo(Cmd& c) {
     if (!c.action) return;
     c.action->setShortcut(current(c.id));
 }
 
+// 명령 id 에 대해 지금 쓰이는 단축키를 가져온다 (재정의가 있으면 그것, 없으면 기본값)
 QKeySequence Shortcuts::current(const QString& id) const {
     if (overrides_.contains(id)) return QKeySequence::fromString(overrides_[id]);
     for (const Cmd& c : cmds_)
@@ -50,6 +54,7 @@ QKeySequence Shortcuts::current(const QString& id) const {
     return QKeySequence();
 }
 
+// 명령을 단축키 목록에 등록한다 (이미 있으면 액션만 교체한다)
 void Shortcuts::registerCmd(QAction* a, const QString& category, const QString& label, const QKeySequence& def) {
     const QString id = category + "/" + label;
     for (Cmd& c : cmds_) {
@@ -64,6 +69,7 @@ void Shortcuts::registerCmd(QAction* a, const QString& category, const QString& 
     applyTo(cmds_.last());
 }
 
+// 새 액션을 만들고 단축키와 실행 함수를 연결해서 등록한다
 QAction* Shortcuts::add(QWidget* owner, const QString& category, const QString& label, const QKeySequence& def, std::function<void()> fn) {
     auto* a = new QAction(label, owner);
     a->setShortcutContext(Qt::WindowShortcut);
@@ -73,10 +79,12 @@ QAction* Shortcuts::add(QWidget* owner, const QString& category, const QString& 
     return a;
 }
 
+// 이미 만들어진 액션을 단축키 목록에 등록한다
 void Shortcuts::adopt(QAction* a, const QString& category) {
     registerCmd(a, category, cleanLabel(a->text()), a->shortcut());
 }
 
+// 단축키 재정의 값을 설정 파일에 저장한다
 void Shortcuts::persist(const QString& id) {
     QSettings st("Ony", "Ony");
     st.beginGroup("shortcuts");
@@ -86,6 +94,7 @@ void Shortcuts::persist(const QString& id) {
     else st.remove(k);
 }
 
+// 명령의 단축키를 바꾼다 (같은 키를 쓰던 다른 명령이 있으면 그 쪽은 해제된다)
 QString Shortcuts::set(const QString& id, const QKeySequence& ks) {
     QString lost;
     if (!ks.isEmpty()) {
@@ -109,6 +118,7 @@ QString Shortcuts::set(const QString& id, const QKeySequence& ks) {
     return lost;
 }
 
+// 특정 명령의 단축키를 기본값으로 되돌린다
 void Shortcuts::reset(const QString& id) {
     for (const Cmd& c : cmds_)
         if (c.id == id) {
@@ -117,6 +127,7 @@ void Shortcuts::reset(const QString& id) {
         }
 }
 
+// 모든 단축키를 기본값으로 되돌린다
 void Shortcuts::resetAll() {
     const auto ids = overrides_.keys();
     overrides_.clear();
@@ -142,6 +153,7 @@ QString Shortcuts::saveProfile(const QString& path) const {
     return {};
 }
 
+// 단축키 설정을 파일에서 불러온다
 QString Shortcuts::loadProfile(const QString& path) {
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return QStringLiteral("파일을 열 수 없습니다.");

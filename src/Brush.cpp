@@ -142,6 +142,7 @@ const QImage& dabFor(BrushDabCache& cache, int preset, int d, int hardness, cons
 } // namespace
 
 int brushPresetCount() { return kCount; }
+// 번호에 해당하는 브러시 프리셋을 반환한다
 const BrushPreset& brushPreset(int i) { return kPresets[std::clamp(i, 0, kCount - 1)]; }
 
 // 감도: curve 가 0 이면 그대로, 음수면 살짝만 눌러도 많이 나가고, 양수면 꾹 눌러야 나간다.

@@ -1,0 +1,20 @@
+name = "ony-license"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# wrangler d1 create ony-license 로 만든 뒤 나오는 database_id 를 아래에 붙여넣기.
+[[d1_databases]]
+binding = "DB"
+database_name = "ony-license"
+database_id = "여기에-wrangler-d1-create-로-받은-database_id-붙여넣기"
+
+# wrangler kv namespace create ony-license-kv 로 만든 뒤 나오는 id 를 아래에 붙여넣기.
+# (부정 결과 캐시 + 아주 가벼운 활성화 요청 횟수 제한용 — 없어도 핵심 동작엔 문제없지만,
+#  D1 읽기 횟수를 줄여 Free 플랜 한도 안에서 오래 버티게 해 준다.)
+[[kv_namespaces]]
+binding = "KV"
+id = "여기에-wrangler-kv-namespace-create-로-받은-id-붙여넣기"
+
+# 실제 비밀값은 커밋하지 말고 다음 명령으로 등록한다 (README 참고):
+#   wrangler secret put SECRET       <- ONY 클라이언트의 License::kSharedSecretHex 와 반드시 같은 값
+#   wrangler secret put ADMIN_KEY    <- 라이선스 발급/취소용 관리자 키 (아무 긴 임의 문자열)

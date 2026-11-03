@@ -9,6 +9,7 @@
 #include "RenderQueue.h"
 #include "LipSync.h"
 #include "Extras.h"
+#include "License.h"
 #include "Effects.h"
 #include "Style.h"
 #include "VideoExport.h"
@@ -96,6 +97,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+// 생성자: 테마 적용, 화면 구성, 문서 신호 연결, 단축키 등록, 마지막 세션 상태 복원
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), doc_(new Document(this)) {
     QSettings st("Ony", "Ony");
     applyTheme(st.value("theme", 0).toInt());
@@ -160,6 +162,7 @@ void MainWindow::applyTheme(int index) {
     if (canvas_) canvas_->setBackdrop(Style::scheme(index).canvasBg);
 }
 
+// 환경설정 대화상자를 연다 (일반/저장/단축키 등 탭 구성)
 void MainWindow::preferencesDialog() {
     QSettings st("Ony", "Ony");
     QDialog dlg(this);
@@ -603,6 +606,7 @@ void MainWindow::buildCentral() {
     });
 }
 
+// 모든 도킹 패널(메인/색상/도구/브러시/라이브러리/타임시트/FX/카메라/스토리보드/스크립트 등)을 만들고 배치·연결한다
 void MainWindow::buildDocks() {
     auto makeDock = [this](const QString& title, QWidget* w, Qt::DockWidgetArea area) {
         auto* d = new QDockWidget(title, this);
@@ -790,6 +794,7 @@ void MainWindow::buildDocks() {
     }
 }
 
+// 브러시 기록 목록을 메뉴로 보여준다
 void MainWindow::showHistory(const QPoint& globalPos) {
     if (history_.isEmpty()) {
         statusBar()->showMessage(QStringLiteral("브러시 기록이 비어 있습니다."), 3000);
@@ -811,6 +816,7 @@ void MainWindow::showHistory(const QPoint& globalPos) {
     menu.exec(globalPos);
 }
 
+// 기록에서 고른 브러시 설정(도구·값·색)을 다시 적용한다
 void MainWindow::applyHistory(const HistEntry& e) {
     brushRow_ = e.row;
     tool_->setRow(e.row);
@@ -913,6 +919,7 @@ bool MainWindow::savePalette(const QString& path) const {
     return true;
 }
 
+// 팔레트 파일을 읽어 들인다 (ONY 자체 JSON 형식 또는 GIMP .gpl 형식 모두 지원)
 int MainWindow::loadPalette(const QString& path) {
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return 0;
@@ -1454,6 +1461,7 @@ void MainWindow::batchFillDialog() {
                              6000);
 }
 
+// 입 모양 맞추기(립싱크) 대화상자: 대사를 음소 코드로 나누고 라이브러리 그림을 프레임에 깐다
 void MainWindow::lipSyncDialog() {
     if (doc_->libraryCount() == 0) {
         QMessageBox::information(
@@ -1603,6 +1611,7 @@ void MainWindow::lipSyncDialog() {
         6000);
 }
 
+// 중간 그림(인비트윈) 자동 생성 대화상자
 void MainWindow::inbetweenDialog() {
     const int l = doc_->currentLayer();
     const int f = doc_->currentFrame();
@@ -1682,6 +1691,7 @@ void MainWindow::runPluginCommand(const Plugins::Command& c) {
                              bad ? 12000 : 4000);
 }
 
+// 플러그인 메뉴를 다시 만든다 (설치된 플러그인의 명령들을 메뉴 항목으로 등록)
 void MainWindow::rebuildPluginMenu() {
     if (!pluginMenu_) return;
     pluginMenu_->clear();
@@ -1725,6 +1735,7 @@ void MainWindow::rebuildPluginMenu() {
     });
 }
 
+// 플러그인 관리 대화상자 (설치된 플러그인 목록·켜고 끄기)
 void MainWindow::pluginManagerDialog() {
     QDialog dlg(this);
     dlg.setWindowTitle("플러그인");
@@ -1855,6 +1866,7 @@ void MainWindow::checkCollabOnOpen(const QString& path) {
     updateTitle();
 }
 
+// 공유 폴더로 함께 작업하기 설정 대화상자 (잠금 상태 보기, 잠금 받기/풀기/뺏기, 저장 이력 보기)
 void MainWindow::collabDialog() {
     QDialog dlg(this);
     dlg.setWindowTitle("공유 폴더로 함께 작업");
@@ -1976,6 +1988,7 @@ void MainWindow::collabDialog() {
     updateTitle();
 }
 
+// 대칭 그리기 설정 대화상자 (좌우/위아래/방사 대칭, 축 위치)
 void MainWindow::symmetryDialog() {
     QDialog dlg(this);
     dlg.setWindowTitle("대칭 그리기");
@@ -2020,6 +2033,7 @@ void MainWindow::symmetryDialog() {
     }
 }
 
+// 그라디언트 · 글자 도구 설정 대화상자
 void MainWindow::gradientTextDialog() {
     QDialog dlg(this);
     dlg.setWindowTitle("그라디언트 / 글자");
@@ -2080,6 +2094,7 @@ void MainWindow::gradientTextDialog() {
     canvas_->setTextParams(t);
 }
 
+// 렌더 카메라(최종 출력 크기) 설정 대화상자
 void MainWindow::renderCameraDialog() {
     QDialog dlg(this);
     dlg.setWindowTitle("렌더 카메라");
@@ -2125,6 +2140,7 @@ void MainWindow::renderCameraDialog() {
     statusBar()->showMessage(n.on ? QString("렌더 카메라: %1 x %2 로 출력합니다.").arg(n.size.width()).arg(n.size.height()) : QStringLiteral("렌더 카메라를 껐습니다 (캔버스 크기로 출력)."), 4000);
 }
 
+// 인쇄 설정 대화상자 (배치, 범위, 프린터/PDF 출력)
 void MainWindow::printDialog() {
     QDialog dlg(this);
     dlg.setWindowTitle("인쇄");
@@ -2182,6 +2198,7 @@ void MainWindow::printDialog() {
 #endif
 }
 
+// 지정한 폴더에 선택한 형식들(동영상·GIF·PNG 시퀀스·PDF·프로젝트 사본·썸네일)을 한번에 만들어 모은다
 QStringList MainWindow::publishTo(const QString& folder, const QString& name, const PublishOptions& po) {
     QStringList made, errs;
     QDir().mkpath(folder);
@@ -2239,6 +2256,7 @@ QStringList MainWindow::publishTo(const QString& folder, const QString& name, co
     return made;
 }
 
+// 퍼블리시 설정 대화상자: 만들 형식을 고른 뒤 publishTo() 로 실행한다
 void MainWindow::publishDialog() {
     if (playTimer_.isActive()) togglePlay();
     QDialog dlg(this);
@@ -2287,6 +2305,7 @@ void MainWindow::publishDialog() {
     statusBar()->showMessage(QString("퍼블리시 완료: %1 (%2개 파일)").arg(QDir::toNativeSeparators(folder)).arg(made.size()), 10000);
 }
 
+// 현재 프레임에 기록된 그리기 획을 애니메이션 프레임들로 풀어 쓰는 대화상자
 void MainWindow::strokeAnimationDialog() {
     const int src = doc_->currentFrame();
     if (doc_->strokeCount(src) == 0) {
@@ -2313,6 +2332,7 @@ void MainWindow::strokeAnimationDialog() {
     statusBar()->showMessage(l >= 0 ? QStringLiteral("획 애니메이션 레이어를 만들었습니다.") : QStringLiteral("만들지 못했습니다."), 3000);
 }
 
+// 장면 전환(디졸브/와이프/슬라이드 등) 적용을 위한 길이 입력 대화상자
 void MainWindow::transitionDialog(int kind, const QString& name) {
     const int l = doc_->currentLayer(), f0 = doc_->currentFrame();
     bool ok = false;
@@ -2321,6 +2341,7 @@ void MainWindow::transitionDialog(int kind, const QString& name) {
     runTransition(l, f0, n, kind);
 }
 
+// 지정한 두 키프레임 사이를 전환 효과로 보간해 중간 프레임들을 만든다
 bool MainWindow::runTransition(int l, int f0, int n, int kind) {
     const int f1 = f0 + n;
     if (f1 >= doc_->frameCount() || doc_->layer(l).locked) {
@@ -2346,6 +2367,7 @@ bool MainWindow::runTransition(int l, int f0, int n, int kind) {
     return true;
 }
 
+// 현재 프레임 이미지에 효과 함수를 적용한다 (편집 가능한 이미지가 없으면 안내)
 void MainWindow::applyEffect(const QString& text, const std::function<QImage(const QImage&)>& fn) {
     if (!doc_->transformCurrent(fn, text))
         statusBar()->showMessage(QStringLiteral("현재 프레임에 편집 가능한 이미지가 없습니다."), 3000);
@@ -2378,6 +2400,7 @@ void MainWindow::transformDialog() {
     canvas_->clearSelection();
 }
 
+// 원근 변형(네 모서리 이동) 설정 대화상자
 void MainWindow::perspectiveDialog() {
     QDialog dlg(this);
     dlg.setWindowTitle("원근");
@@ -2413,6 +2436,7 @@ void MainWindow::perspectiveDialog() {
     canvas_->clearSelection();
 }
 
+// 폴더(레이어 그룹) 관련 동작 (만들기/넣기/보이기토글/불투명도/삭제/중첩) 을 처리한다
 void MainWindow::folderAction(int kind) {
     auto pick = [this](const QString& title, bool allowNone, int* out) {
         QStringList items;
@@ -2516,6 +2540,7 @@ void MainWindow::updateWaveform() {
     wave_->setVisible(waveVisible_);
 }
 
+// 사운드 트랙 파일을 불러온다
 void MainWindow::loadAudio() {
     const QString path = QFileDialog::getOpenFileName(this, "사운드 트랙 불러오기", QString(), "오디오 (*.wav *.mp3 *.ogg *.flac *.m4a)");
     if (path.isEmpty()) return;
@@ -2523,6 +2548,7 @@ void MainWindow::loadAudio() {
     syncAudio();
 }
 
+// 오디오 파형을 갱신하고 미디어 플레이어에 현재 사운드 트랙을 연결한다
 void MainWindow::syncAudio() {
     updateWaveform();
     if (doc_->audioPath().isEmpty()) {
@@ -2652,6 +2678,7 @@ void MainWindow::buildMenus() {
     act(file, "동영상 가져오기...", [this] { importVideoDialog(); });
     act(file, "PSD 가져오기 (레이어 유지)...", [this] { importPsdDialog(); });
     act(file, "PSD로 내보내기 (레이어 유지)...", [this] { exportPsdDialog(); });
+    act(file, "After Effects 로 내보내기 (레이어 PNG 시퀀스 + JSON)...", [this] { exportAfterEffectsDialog(); });
     file->addSeparator();
     act(file, "프로젝트 닫기", [this] {
         if (!maybeSave()) return;
@@ -3396,6 +3423,7 @@ void MainWindow::buildMenus() {
         }
     }
     act(help, "개인정보 설정", [this] { Privacy::showDialog(this); });
+    act(help, "라이선스 정보...", [this] { licenseDialog(); });
     act(help, "정보", [this] {
         QMessageBox box(this);
         box.setWindowTitle("정보");
@@ -3546,6 +3574,7 @@ void MainWindow::buildMenus() {
     SC.add(this, "패널", "브러시 패널 표시/숨김", QKeySequence("Shift+B"), [this] { dockBrush_->setVisible(!dockBrush_->isVisible()); });
 }
 
+// 도구막대에 도크(패널) 보이기/숨기기 토글 버튼을 추가한다
 void MainWindow::addDockToggle(QToolBar* tb, QDockWidget* dock, const QString& iconName, const QString& tip) {
     QAction* a = tb->addAction(Style::icon(iconName, 22), tip);
     a->setCheckable(true);
@@ -3557,6 +3586,7 @@ void MainWindow::addDockToggle(QToolBar* tb, QDockWidget* dock, const QString& i
     });
 }
 
+// 현재 작업 공간 룸의 이름을 바꾼다
 void MainWindow::renameRoom() {
     bool ok = false;
     const QString n = QInputDialog::getText(this, "룸 이름", "이름:", QLineEdit::Normal, roomNames_[curRoom_], &ok);
@@ -3565,6 +3595,7 @@ void MainWindow::renameRoom() {
     roomCombo_->setItemText(curRoom_, n);
 }
 
+// 룸(작업 공간 배치) 설정을 파일로 저장한다
 void MainWindow::saveRooms() {
     const QString path = QFileDialog::getSaveFileName(this, "룸 저장", QString(), "룸 설정 (*.ini)");
     if (path.isEmpty()) return;
@@ -3576,6 +3607,7 @@ void MainWindow::saveRooms() {
     statusBar()->showMessage("룸을 저장했습니다.", 3000);
 }
 
+// 파일에서 룸(작업 공간 배치) 설정을 불러온다
 void MainWindow::loadRooms() {
     const QString path = QFileDialog::getOpenFileName(this, "룸 불러오기", QString(), "룸 설정 (*.ini)");
     if (path.isEmpty()) return;
@@ -3594,6 +3626,7 @@ void MainWindow::loadRooms() {
     statusBar()->showMessage("룸을 불러왔습니다.", 3000);
 }
 
+// 다른 작업 공간 룸으로 전환한다 (Ctrl+Alt 를 누르면 지금 배치를 그대로 물려받는다)
 void MainWindow::applyRoom(int index) {
     if (index < 0 || index >= roomStates_.size() || index == curRoom_) return;
     const bool copy = QApplication::keyboardModifiers().testFlags(Qt::ControlModifier | Qt::AltModifier);
@@ -3608,6 +3641,7 @@ void MainWindow::applyRoom(int index) {
     }
 }
 
+// 룸(작업 공간)별 기본 패널 배치를 적용한다
 void MainWindow::applyRoomDefault(int index) {
     // 룸마다 오른쪽 서랍에 보이는 패널이 달라진다.
     const QList<QDockWidget*> right = {dockBrush_, dockLibrary_, dockTimesheet_, dockFx_, dockCamera_, dockStory_,
@@ -3629,6 +3663,7 @@ void MainWindow::releaseCollabLock() {
     if (collabOn_ && !collabReadOnly_ && !doc_->path().isEmpty()) Collab::releaseLock(doc_->path());
 }
 
+// 변경 사항이 있으면 저장할지 묻는다. 취소를 누르면 false
 bool MainWindow::maybeSave() {
     if (!doc_->modified()) return true;
     const auto r = QMessageBox::question(this, "저장", "변경 사항을 저장할까요?",
@@ -3638,6 +3673,7 @@ bool MainWindow::maybeSave() {
     return true;
 }
 
+// 창을 닫을 때: 재생 중지, 저장 여부 확인, 협업 잠금 해제, 창 위치 저장
 void MainWindow::closeEvent(QCloseEvent* e) {
     playTimer_.stop();
     if (player_) player_->stop();
@@ -3650,6 +3686,7 @@ void MainWindow::closeEvent(QCloseEvent* e) {
     }
 }
 
+// 프로젝트 설정(해상도·프레임 속도·프레임 수·색 공간) 대화상자
 void MainWindow::projectSettingsDialog() {
     if (playTimer_.isActive()) togglePlay();
     QDialog dlg(this);
@@ -3751,6 +3788,7 @@ void MainWindow::nextFrameAction(bool forceNewImage) {
     if (makeNew) ensureBlankKey();
 }
 
+// 새 프로젝트 만들기 대화상자 (해상도·프레임 수·프레임 속도)
 void MainWindow::newProjectDialog() {
     if (!maybeSave()) return;
     QDialog dlg(this);
@@ -3784,6 +3822,7 @@ void MainWindow::newProjectDialog() {
     canvas_->zoomFit();
 }
 
+// 프로젝트 파일 열기 대화상자
 void MainWindow::openProject() {
     if (!maybeSave()) return;
     const QString path = QFileDialog::getOpenFileName(this, "프로젝트 열기", QString(), "ONY 프로젝트 (*.ony *.tvpx)");
@@ -3791,6 +3830,7 @@ void MainWindow::openProject() {
     openPath(path);
 }
 
+// 지정한 경로의 프로젝트 파일을 연다 (곁다리 클립·오디오 동기화 포함)
 void MainWindow::openPath(const QString& path) {
     if (playTimer_.isActive()) togglePlay();
     if (!doc_->load(path)) {
@@ -3804,6 +3844,7 @@ void MainWindow::openPath(const QString& path) {
     checkCollabOnOpen(path);
 }
 
+// 자동 저장(오토세이브) 타이머를 설정한다
 void MainWindow::setupAutosave() {
     if (!autosaveTimer_) {
         autosaveTimer_ = new QTimer(this);
@@ -3818,24 +3859,28 @@ void MainWindow::setupAutosave() {
     if (min > 0) autosaveTimer_->start(min * 60 * 1000);
 }
 
+// 최근에 연 프로젝트 중 존재하는 첫 파일을 연다
 void MainWindow::openLastProject() {
     const QStringList l = QSettings("Ony", "Ony").value("recent/files").toStringList();
     for (const QString& p : l)
         if (QFileInfo::exists(p)) { openPath(p); return; }
 }
 
+// 백업 파일을 저장할 폴더 경로 (없으면 만든다)
 QString MainWindow::backupDir() const {
     const QString d = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/backup";
     QDir().mkpath(d);
     return d;
 }
 
+// 템플릿 파일을 저장할 폴더 경로 (없으면 만든다)
 QString MainWindow::templateDir() const {
     const QString d = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/templates";
     QDir().mkpath(d);
     return d;
 }
 
+// 최근에 연 파일 목록에 경로를 추가한다 (최대 10개)
 void MainWindow::addRecent(const QString& path) {
     QSettings st("Ony", "Ony");
     QStringList l = st.value("recent/files").toStringList();
@@ -3846,6 +3891,7 @@ void MainWindow::addRecent(const QString& path) {
     st.setValue("recent/files", l);
 }
 
+// 프로젝트를 파일로 저장한다 (덮어쓰기 전 백업, 협업 이력 기록, 추가 클립 파일 저장 포함)
 bool MainWindow::writeProject(const QString& path) {
     const int keep = clipIdx_;
     if (clipNames_.size() > 1 && clipIdx_ != 0) switchClip(0);
@@ -3887,12 +3933,14 @@ bool MainWindow::writeProject(const QString& path) {
     return ok;
 }
 
+// 클립 목록을 기본 상태(클립 1개)로 되돌린다
 void MainWindow::resetClips() {
     clipNames_ = QStringList{QStringLiteral("클립 1")};
     clipFiles_ = QStringList{QString()};
     clipIdx_ = 0;
 }
 
+// 프로젝트 파일과 같은 이름의 곁다리 클립 파일들(.clipN.ony)과 클립 이름 목록(.clips)을 불러온다
 void MainWindow::loadClipSiblings(const QString& path) {
     resetClips();
     QString base = path;
@@ -3911,6 +3959,7 @@ void MainWindow::loadClipSiblings(const QString& path) {
     }
 }
 
+// 프로젝트를 저장한다 (경로가 없으면 다른 이름으로 저장, 보기 전용이면 확인)
 bool MainWindow::saveProject() {
     if (doc_->path().isEmpty()) return saveProjectAs();
     if (collabOn_ && collabReadOnly_) {
@@ -3930,6 +3979,7 @@ bool MainWindow::saveProject() {
     return true;
 }
 
+// 다른 이름으로 프로젝트를 저장한다
 bool MainWindow::saveProjectAs() {
     QString path = QFileDialog::getSaveFileName(this, "다른 이름으로 저장", QString(), "ONY 프로젝트 (*.ony)");
     if (path.isEmpty()) return false;
@@ -3942,6 +3992,7 @@ bool MainWindow::saveProjectAs() {
     return true;
 }
 
+// 현재 프레임을 PNG 파일로 내보낸다
 void MainWindow::exportCurrentPng() {
     QString path = QFileDialog::getSaveFileName(this, "PNG로 내보내기", QString(), "PNG 이미지 (*.png)");
     if (path.isEmpty()) return;
@@ -3949,6 +4000,7 @@ void MainWindow::exportCurrentPng() {
     if (!doc_->exportFrame(doc_->currentFrame(), path)) QMessageBox::warning(this, "내보내기 실패", "파일을 저장할 수 없습니다.");
 }
 
+// 동영상/이미지 시퀀스 내보내기 대화상자 (형식·범위·화질·배경·오디오, 백그라운드 내보내기 포함)
 void MainWindow::exportVideoDialog() {
     if (playTimer_.isActive()) togglePlay();
     QDialog dlg(this);
@@ -4156,6 +4208,7 @@ void MainWindow::exportVideoDialog() {
     }
 }
 
+// 모든 프레임을 PNG 이미지 시퀀스로 폴더에 내보낸다
 void MainWindow::exportPngSequence() {
     const QString dir = QFileDialog::getExistingDirectory(this, "내보낼 폴더 선택");
     if (dir.isEmpty()) return;
@@ -4167,6 +4220,7 @@ void MainWindow::exportPngSequence() {
     statusBar()->showMessage(QString("%1 / %2 프레임을 내보냈습니다.").arg(ok).arg(doc_->frameCount()), 5000);
 }
 
+// 타임시트를 PDF 파일로 내보낸다
 void MainWindow::exportTimesheetPdf() {
     QString path = QFileDialog::getSaveFileName(this, "타임시트 PDF로 내보내기", QString(), "PDF (*.pdf)");
     if (path.isEmpty()) return;
@@ -4245,11 +4299,13 @@ void MainWindow::scrubAudioAt(int frame) {
     scrubStop_.start(std::min(200, std::max(60, 1000 / fps)));
 }
 
+// 프록시(미리보기 해상도 낮추기) 선택을 저장한다
 void MainWindow::setProxyChoice(int idx) {
     proxyChoice_ = idx == 1 ? 2 : (idx == 2 ? 4 : 1);
     if (playTimer_.isActive()) doc_->setProxyDivisor(proxyChoice_);
 }
 
+// 재생/정지를 토글한다
 void MainWindow::togglePlay() {
     if (playTimer_.isActive()) {
         playTimer_.stop();
@@ -4270,6 +4326,7 @@ void MainWindow::togglePlay() {
     }
 }
 
+// 재생 타이머마다 한 프레임 진행한다 (반복 구간, 핑퐁 왕복, 끝 도달 처리 포함)
 void MainWindow::stepPlay() {
     const bool useLoop = loopModeBtn_->isChecked() && loopA_ >= 0;
     const int lo = useLoop ? loopA_ : 0;
@@ -4293,6 +4350,7 @@ void MainWindow::stepPlay() {
     doc_->setCurrentFrame(std::clamp(next, 0, doc_->frameCount() - 1));
 }
 
+// 창 제목을 갱신한다 (파일 이름, 수정 표시, 협업 상태)
 void MainWindow::updateTitle() {
     const QString name = doc_->path().isEmpty() ? QStringLiteral("이름 없는 프로젝트") : QFileInfo(doc_->path()).fileName();
     QString tag;
@@ -4305,6 +4363,7 @@ void MainWindow::updateTitle() {
     setWindowTitle(QString("ONY - %1%2%3").arg(name, doc_->modified() ? "*" : "", tag));
 }
 
+// 상태 표시줄의 정보(좌표, 색상, 프로젝트/클립/레이어/이미지 정보, 줌)를 갱신한다
 void MainWindow::updateInfo() {
     // 줄이 좁으면 글을 … 으로 줄여서, 옆 칸을 밀거나 겹치지 않게 한다
     auto setElided = [](QLabel* lb, const QString& t) {
@@ -4378,6 +4437,7 @@ bool MainWindow::eventFilter(QObject* o, QEvent* e) {
     return QMainWindow::eventFilter(o, e);
 }
 
+// 서랍(도크) 자동 숨김 처리: 가장자리에 마우스를 대면 나타나고 일정 시간 벗어나면 숨긴다
 void MainWindow::drawerTick() {
     const QPoint pos = mapFromGlobal(QCursor::pos());
     const bool inside = rect().contains(pos);
@@ -4420,6 +4480,7 @@ void MainWindow::drawerTick() {
 }
 
 // ---------------------------------------------------------------- 메시 워프 / 스캔 / XDTS
+// 메시 워프(그물망 변형) 대화상자
 void MainWindow::meshWarpDialog() {
     const int l = doc_->currentLayer(), k = doc_->keyIndexAt(l, doc_->currentFrame());
     if (k < 0 || doc_->layer(l).locked) {
@@ -4432,6 +4493,7 @@ void MainWindow::meshWarpDialog() {
     applyEffect("메시 워프", [&](const QImage&) { return res; });
 }
 
+// 스캔한 종이 그림을 불러와 선만 추출해 깨끗하게 만드는 대화상자
 void MainWindow::scanImportDialog() {
     const QString path = QFileDialog::getOpenFileName(this, "스캔 이미지 선택", QString(), "이미지 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)");
     if (path.isEmpty()) return;
@@ -4680,6 +4742,7 @@ void MainWindow::importPsdDialog() {
     statusBar()->showMessage(QString("PSD 에서 레이어 %1개를 가져왔습니다.").arg(made), 7000);
 }
 
+// 현재 프레임을 PSD 파일로 내보내는 대화상자 (레이어 유지 또는 한 장으로 합치기)
 void MainWindow::exportPsdDialog() {
     QDialog dlg(this);
     dlg.setWindowTitle("PSD로 내보내기");
@@ -4736,6 +4799,7 @@ void MainWindow::exportPsdDialog() {
     else QMessageBox::warning(this, "PSD 내보내기 실패", err);
 }
 
+// 여러 이미지 파일(시퀀스)을 순서대로 프레임에 가져오는 대화상자
 void MainWindow::importSequenceDialog() {
     QStringList files = QFileDialog::getOpenFileNames(this, "이미지 시퀀스 선택 (파일 이름 순서대로 프레임에 들어갑니다)", QString(),
                                                       "이미지 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)");
@@ -4767,6 +4831,7 @@ void MainWindow::importSequenceDialog() {
     statusBar()->showMessage(QString("%1 / %2 개 이미지를 가져왔습니다.").arg(ok).arg(files.size()), 4000);
 }
 
+// 현재 프로젝트를 XDTS 형식으로 내보낸다
 void MainWindow::exportXdtsDialog() {
     QString path = QFileDialog::getSaveFileName(this, "XDTS 내보내기", QString(), "XDTS (*.xdts)");
     if (path.isEmpty()) return;
@@ -4774,6 +4839,97 @@ void MainWindow::exportXdtsDialog() {
     QString err;
     if (!Extras::exportXdts(doc_, path, &err)) QMessageBox::warning(this, "내보내기 실패", err);
     else statusBar()->showMessage("XDTS 를 내보냈습니다.", 4000);
+}
+
+// After Effects 로 내보내기 대화상자: 저장할 폴더를 고르면 레이어별 PNG 시퀀스와 JSON 매니페스트를 함께 만든다.
+void MainWindow::exportAfterEffectsDialog() {
+    QDialog dlg(this);
+    dlg.setWindowTitle("After Effects 로 내보내기");
+    auto* f = new QFormLayout(&dlg);
+    f->addRow(new QLabel(
+        "레이어마다 키 이미지를 PNG 시퀀스로, 레이어 구조·타이밍·블렌드모드 정보를\n"
+        "JSON 파일(<이름>_ae.json)로 함께 내보냅니다.\n"
+        "에펙(After Effects)에서 스크립트로 이 JSON을 읽어 레이어를 자동으로 맞출 수 있습니다."));
+    auto* name = new QLineEdit(doc_->path().isEmpty() ? QStringLiteral("ONY") : QFileInfo(doc_->path()).completeBaseName());
+    auto* cam = new QCheckBox("카메라 키프레임도 같이 내보내기");
+    cam->setChecked(doc_->cameraEnabled());
+    cam->setEnabled(doc_->cameraEnabled());
+    f->addRow("이름", name);
+    f->addRow(cam);
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    f->addRow(bb);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    if (dlg.exec() != QDialog::Accepted) return;
+    const QString nm = name->text().trimmed().isEmpty() ? QStringLiteral("ONY") : name->text().trimmed();
+    const QString parent = QFileDialog::getExistingDirectory(this, "내보낼 위치 선택");
+    if (parent.isEmpty()) return;
+    const QString folder = QDir(parent).filePath(nm + "_ae");
+    QString err;
+    if (!Extras::exportAfterEffects(doc_, folder, nm, cam->isChecked(), &err))
+        QMessageBox::warning(this, "내보내기 실패", err);
+    else
+        statusBar()->showMessage("After Effects 용으로 내보냈습니다: " + QDir::toNativeSeparators(folder), 8000);
+}
+
+// 라이선스 상태 보기 / 수동 재검증 / 다른 키로 바꾸기 / 이 기기에서 반납하기
+void MainWindow::licenseDialog() {
+    QDialog dlg(this);
+    dlg.setWindowTitle("라이선스 정보");
+    dlg.setMinimumWidth(420);
+    auto* lay = new QVBoxLayout(&dlg);
+    auto* status = new QLabel;
+    status->setWordWrap(true);
+    lay->addWidget(status);
+    auto refresh = [status] {
+        const License::Status st = License::currentStatus();
+        QString s = st.licenseKey.isEmpty() ? QStringLiteral("등록된 라이선스가 없습니다.")
+                                             : QString("키: %1\n상태: %2").arg(st.licenseKey, st.licensed ? QStringLiteral("정상 사용 중") : QStringLiteral("사용 불가"));
+        s += "\n" + st.message;
+        s += "\n연락처 동의: " + (st.contactConsentGiven ? QString("예 (%1)").arg(st.contactEmail) : QStringLiteral("아니오"));
+        status->setText(s);
+    };
+    refresh();
+    auto* row = new QHBoxLayout;
+    auto* revalBtn = new QPushButton("지금 다시 확인");
+    auto* changeBtn = new QPushButton("다른 키로 바꾸기...");
+    auto* dropBtn = new QPushButton("이 기기에서 반납");
+    auto* withdrawBtn = new QPushButton("연락처 정보 삭제");
+    for (QPushButton* b : {revalBtn, changeBtn, dropBtn, withdrawBtn}) row->addWidget(b);
+    row->addStretch();
+    lay->addLayout(row);
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Close);
+    lay->addWidget(bb);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::accept);
+
+    auto* client = new License::Client(&dlg);
+    connect(revalBtn, &QPushButton::clicked, &dlg, [status, client] {
+        status->setText("서버에 다시 확인하는 중...");
+        client->revalidate();
+    });
+    connect(client, &License::Client::revalidated, &dlg, [this, refresh](bool, const QString& msg) {
+        refresh();
+        statusBar()->showMessage(msg, 5000);
+    });
+    connect(dropBtn, &QPushButton::clicked, &dlg, [&dlg, client] {
+        if (QMessageBox::question(&dlg, "라이선스 반납", "이 기기에서 라이선스를 반납할까요?\n다른 기기에서 쓸 수 있게 자리가 비워집니다.") != QMessageBox::Yes) return;
+        client->deactivate();
+    });
+    connect(client, &License::Client::deactivated, &dlg, [this, refresh](bool, const QString& msg) {
+        refresh();
+        if (!msg.isEmpty()) statusBar()->showMessage(msg, 5000);
+    });
+    connect(changeBtn, &QPushButton::clicked, &dlg, [this, &dlg, refresh] {
+        License::clearLicense();
+        if (License::ensureLicensed(this)) refresh();
+        else statusBar()->showMessage(QStringLiteral("라이선스를 등록하지 않았습니다."), 4000);
+    });
+    connect(withdrawBtn, &QPushButton::clicked, &dlg, [client] { client->withdrawContact(); });
+    connect(client, &License::Client::contactWithdrawn, &dlg, [this, refresh](bool, const QString& msg) {
+        refresh();
+        if (!msg.isEmpty()) statusBar()->showMessage(msg, 5000);
+    });
+    dlg.exec();
 }
 
 // ---------------------------------------------------------------- 다중 클립
@@ -4787,6 +4943,7 @@ void MainWindow::syncClipFiles() {
     doc_->setModified(keepMod);
 }
 
+// 다른 클립으로 전환한다 (현재 클립은 임시 파일에 저장해 둔다)
 void MainWindow::switchClip(int idx) {
     if (idx == clipIdx_ || idx < 0 || idx >= clipNames_.size()) return;
     if (playTimer_.isActive()) togglePlay();
@@ -4806,6 +4963,7 @@ void MainWindow::switchClip(int idx) {
     canvas_->zoomFit();
 }
 
+// 클립 탭 UI를 클립 이름 목록과 맞춰 다시 그린다
 void MainWindow::syncClipTabs() {
     if (!clipTabs_) return;
     bool same = clipTabs_->count() == clipNames_.size() && clipTabs_->currentIndex() == clipIdx_;
@@ -4821,6 +4979,7 @@ void MainWindow::syncClipTabs() {
     }
 }
 
+// 클립을 하나 새로 추가하고 전환한다
 void MainWindow::newClip() {
     const QSize sz = doc_->size();
     const int fps = doc_->fps(), frames = doc_->frameCount();
@@ -4896,6 +5055,7 @@ void MainWindow::mergeClip() {
     }
 }
 
+// 현재 클립의 이름을 바꾼다
 void MainWindow::renameClip() {
     bool ok = false;
     const QString n = QInputDialog::getText(this, "클립 이름", "이름:", QLineEdit::Normal, clipNames_[clipIdx_], &ok);
@@ -4905,6 +5065,7 @@ void MainWindow::renameClip() {
     }
 }
 
+// 현재 클립을 삭제한다 (마지막 클립이면 삭제 불가)
 void MainWindow::deleteClip() {
     if (clipNames_.size() <= 1) {
         statusBar()->showMessage(QStringLiteral("마지막 클립은 삭제할 수 없습니다."), 3000);
@@ -4921,6 +5082,7 @@ void MainWindow::deleteClip() {
     updateInfo();
 }
 
+// 클립 메뉴에서 클립 전환 목록 부분만 다시 만든다
 void MainWindow::rebuildClipMenu() {
     // 구분선 뒤의 항목(클립 전환 목록)만 다시 만든다.
     const auto acts = clipMenu_->actions();
@@ -5010,6 +5172,7 @@ void MainWindow::rebuildCustomMenu() {
     }
 }
 
+// 사용자 정의(커스텀) 패널 창을 띄운다
 void MainWindow::openCustomPanel(int i) {
     if (i < 0 || i >= customDefs_.size()) return;
     auto* d = new QDockWidget(customDefs_[i].name, this);

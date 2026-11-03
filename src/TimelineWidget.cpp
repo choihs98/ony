@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 
+// 생성자: 문서 변경 신호에 맞춰 다시 그리도록 연결한다
 TimelineWidget::TimelineWidget(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) {
     setMouseTracking(true);
     auto refresh = [this] {
@@ -29,10 +30,12 @@ TimelineWidget::TimelineWidget(Document* doc, QWidget* parent) : QWidget(parent)
     resize(sizeHint());
 }
 
+// 타임라인 전체가 필요로 하는 크기를 계산한다 (레이어 수 × 프레임 수 기준)
 QSize TimelineWidget::sizeHint() const {
     return QSize(kNameW + doc_->frameCount() * cellW_ + 24, kHeader + doc_->layerCount() * rowH_ + 6);
 }
 
+// 칸 너비(확대/축소 수준)를 설정한다
 void TimelineWidget::setCellWidth(int w) {
     w = std::clamp(w, 8, 96);
     if (w == cellW_) return;
@@ -42,6 +45,7 @@ void TimelineWidget::setCellWidth(int w) {
     emit zoomChanged();
 }
 
+// 줄 높이를 좁게/넓게 모드로 전환한다
 void TimelineWidget::setCompact(bool on) {
     if (on == compact_) return;
     compact_ = on;
@@ -51,6 +55,7 @@ void TimelineWidget::setCompact(bool on) {
     emit zoomChanged();
 }
 
+// Ctrl+휠로 칸 너비를 확대/축소한다
 void TimelineWidget::wheelEvent(QWheelEvent* e) {
     if (e->modifiers() & Qt::ControlModifier) {
         setCellWidth(cellW_ + (e->angleDelta().y() > 0 ? 4 : -4));
@@ -60,18 +65,22 @@ void TimelineWidget::wheelEvent(QWheelEvent* e) {
     QWidget::wheelEvent(e);
 }
 
+// 최소 크기 힌트 (sizeHint 와 동일하게 맞춘다)
 QSize TimelineWidget::minimumSizeHint() const {
     return sizeHint();
 }
 
+// 화면 행 번호를 레이어 인덱스로 변환한다 (위가 마지막 레이어)
 int TimelineWidget::rowToLayer(int row) const {
     return doc_->layerCount() - 1 - row;
 }
 
+// 레이어 인덱스를 화면 행 번호로 변환한다
 int TimelineWidget::layerToRow(int layer) const {
     return doc_->layerCount() - 1 - layer;
 }
 
+// 이미지의 축소판을 캐시에서 가져오거나 새로 만든다
 const QPixmap& TimelineWidget::thumb(const QImage& img, QSize box) {
     const qint64 key = img.cacheKey() ^ (qint64(box.width()) << 50) ^ (qint64(box.height()) << 40);
     auto it = thumbs_.find(key);
@@ -158,16 +167,19 @@ QRect TimelineWidget::eyeRect(int row) const {
     return QRect(4, y + (rowH_ - (s * 2 + gap)) / 2, s, s);
 }
 
+// 잠금 아이콘이 그려질 사각형을 계산한다
 QRect TimelineWidget::lockRect(int row) const {
     const QRect e = eyeRect(row);
     if (compact_) return e.translated(e.width() + 4, 0);
     return e.translated(0, e.height() + 6);
 }
 
+// 헤더에서 아이콘들이 끝나는 오른쪽 x 좌표를 계산한다
 int TimelineWidget::headerIconRight() const {
     return (compact_ ? lockRect(0).right() : eyeRect(0).right()) + 1;
 }
 
+// 레이어의 내용 시작·끝 프레임을 계산한다 (캐시 사용)
 QPoint TimelineWidget::layerRange(int layer) const {
     auto it = rangeCache_.constFind(layer);
     if (it != rangeCache_.constEnd()) return it.value();
@@ -176,6 +188,7 @@ QPoint TimelineWidget::layerRange(int layer) const {
     return v;
 }
 
+// 프리/포스트 비헤이비어 단추가 그려질 사각형을 계산한다
 QRect TimelineWidget::behaviorButton(int row, int which) const {
     if (row < 0 || row >= doc_->layerCount()) return QRect();
     const int l = rowToLayer(row);
@@ -190,6 +203,7 @@ QRect TimelineWidget::behaviorButton(int row, int which) const {
     return QRect(kNameW + f * cellW_ + (cellW_ - side) / 2, y + (rowH_ - side) / 2, side, side);
 }
 
+// 타임라인 전체(레이어 이름·눈/잠금·칸·비헤이비어 단추·노출 구간)를 그린다
 void TimelineWidget::paintEvent(QPaintEvent* ev) {
     rangeCache_.clear();   // 그릴 때마다 새로 계산한다 (그 사이에는 재활용)
     QPainter p(this);
@@ -386,6 +400,7 @@ void TimelineWidget::paintEvent(QPaintEvent* ev) {
     p.drawLine(kNameW, 0, kNameW, height());
 }
 
+// 마우스가 올라간 비헤이비어 단추를 갱신하고 그 자리만 다시 그린다
 void TimelineWidget::updateHover(const QPoint& pos) {
     int row = -1, which = -1;
     if (pos.y() >= kHeader) {
@@ -414,10 +429,12 @@ void TimelineWidget::updateHover(const QPoint& pos) {
     }
 }
 
+// 마우스가 위젯을 벗어나면 강조 표시를 지운다
 void TimelineWidget::leaveEvent(QEvent*) {
     updateHover(QPoint(-1, -1));
 }
 
+// 클릭 위치가 비헤이비어 단추 위면 메뉴를 띄워 값을 바꾼다
 bool TimelineWidget::behaviorMenuAt(const QPoint& pos) {
     if (pos.y() < kHeader) return false;
     const int row = (pos.y() - kHeader) / rowH_;
@@ -452,6 +469,7 @@ bool TimelineWidget::behaviorMenuAt(const QPoint& pos) {
     return false;
 }
 
+// 클릭/드래그 위치에 따라 현재 레이어·프레임을 바꾸거나 눈/잠금 단추를 토글한다
 void TimelineWidget::pick(const QPoint& pos, bool pressed) {
     const int frames = doc_->frameCount();
     if (pos.x() >= kNameW) {
@@ -481,12 +499,14 @@ void TimelineWidget::pick(const QPoint& pos, bool pressed) {
     }
 }
 
+// 선택된 프레임 구간을 지운다
 void TimelineWidget::clearRange() {
     rangeA_ = rangeB_ = -1;
     update();
     emit rangeChanged(-1, -1);
 }
 
+// 마우스 누름: Shift+클릭이면 구간 선택 시작, 아니면 비헤이비어 메뉴나 일반 선택 처리
 void TimelineWidget::mousePressEvent(QMouseEvent* e) {
     if (e->button() != Qt::LeftButton) return;
     if (e->pos().y() < kHeader && e->pos().x() >= kNameW && (e->modifiers() & Qt::ShiftModifier)) {
@@ -500,6 +520,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* e) {
     pick(e->pos(), true);
 }
 
+// 마우스 이동: 구간 드래그 중이면 범위를 넓히고, 아니면 일반 드래그 선택을 처리한다
 void TimelineWidget::mouseMoveEvent(QMouseEvent* e) {
     if (!(e->buttons() & Qt::LeftButton)) updateHover(e->pos());
     if (rangeDrag_) {
@@ -512,12 +533,14 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* e) {
     if (e->buttons() & Qt::LeftButton) pick(e->pos(), false);
 }
 
+// 마우스 뗌: 구간 드래그를 끝내고 선택 범위를 알린다
 void TimelineWidget::mouseReleaseEvent(QMouseEvent*) {
     if (!rangeDrag_) return;
     rangeDrag_ = false;
     emit rangeChanged(rangeA_, rangeB_);
 }
 
+// 오른쪽 클릭 메뉴: 프레임 추가/삽입/삭제와 레이어 메뉴를 보여준다
 void TimelineWidget::contextMenuEvent(QContextMenuEvent* e) {
     if (e->pos().y() < kHeader) return;
     const int row = (e->pos().y() - kHeader) / rowH_;
@@ -533,6 +556,7 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* e) {
     menu.exec(e->globalPos());
 }
 
+// 레이어 이름 칸을 더블클릭하면 이름을 바꾸는 입력창을 띄운다
 void TimelineWidget::mouseDoubleClickEvent(QMouseEvent* e) {
     // 레이어 이름 칸 더블클릭 → 이름 변경
     if (e->pos().x() >= 80 && e->pos().x() < kNameW && e->pos().y() >= kHeader) {
@@ -555,12 +579,14 @@ ScrubBar::ScrubBar(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) 
     connect(doc_, &Document::currentChanged, this, [this] { update(); });
 }
 
+// x 좌표에 해당하는 프레임 번호를 계산한다
 int ScrubBar::frameAt(int x) const {
     const int n = doc_->frameCount();
     const double cw = double(width() - 8) / n;
     return std::clamp(int((x - 4) / cw), 0, n - 1);
 }
 
+// 눈금·현재 프레임·선택 구간을 그린다
 void ScrubBar::paintEvent(QPaintEvent*) {
     QPainter p(this);
     const QPalette pal = palette();
@@ -585,10 +611,12 @@ void ScrubBar::paintEvent(QPaintEvent*) {
     }
 }
 
+// 클릭한 위치의 프레임으로 이동한다
 void ScrubBar::mousePressEvent(QMouseEvent* e) {
     if (e->button() == Qt::LeftButton) doc_->setCurrentFrame(frameAt(e->pos().x()));
 }
 
+// 드래그하는 동안 계속 프레임을 따라간다
 void ScrubBar::mouseMoveEvent(QMouseEvent* e) {
     if (e->buttons() & Qt::LeftButton) doc_->setCurrentFrame(frameAt(e->pos().x()));
 }
@@ -602,18 +630,21 @@ WaveformBar::WaveformBar(Document* doc, QWidget* parent) : QWidget(parent), doc_
     connect(doc_, &Document::structureChanged, this, [this] { update(); });
 }
 
+// 소리 파형 데이터를 설정한다
 void WaveformBar::setPeaks(const QVector<float>& peaks, const QString& label) {
     peaks_ = peaks;
     label_ = label;
     update();
 }
 
+// 소리 파형 데이터를 지운다
 void WaveformBar::clearPeaks() {
     peaks_.clear();
     label_.clear();
     update();
 }
 
+// 소리 파형과 재생 헤드를 그린다
 void WaveformBar::paintEvent(QPaintEvent*) {
     QPainter p(this);
     const QPalette pal = palette();
@@ -649,6 +680,7 @@ void WaveformBar::paintEvent(QPaintEvent*) {
     }
 }
 
+// 클릭한 위치에 해당하는 프레임으로 재생 헤드를 옮긴다
 void WaveformBar::mousePressEvent(QMouseEvent* e) {
     const int n = std::max(1, doc_->frameCount());
     doc_->setCurrentFrame(std::clamp(int(qint64(e->pos().x()) * n / std::max(1, width())), 0, n - 1));

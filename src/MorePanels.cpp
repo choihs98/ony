@@ -43,12 +43,14 @@ QRect DockTitleBar::buttonRect(int i) const {
     return QRect(x, (height() - kBtn) / 2, kBtn, kBtn);
 }
 
+// 화면 좌표가 세 버튼(고정/접기/닫기) 중 어디 위에 있는지 찾는다 (없으면 -1)
 int DockTitleBar::buttonAt(const QPoint& pos) const {
     for (int i = 0; i < kBtnCount; ++i)
         if (buttonRect(i).contains(pos)) return i;
     return -1;
 }
 
+// 마우스가 지나가는 버튼을 강조 표시하고 툴팁을 보여준다
 void DockTitleBar::mouseMoveEvent(QMouseEvent* e) {
     const int h = buttonAt(e->pos());
     if (h != hot_) {
@@ -60,6 +62,7 @@ void DockTitleBar::mouseMoveEvent(QMouseEvent* e) {
     QWidget::mouseMoveEvent(e);
 }
 
+// 마우스가 제목줄을 벗어나면 강조 표시를 지운다
 void DockTitleBar::leaveEvent(QEvent*) {
     if (hot_ < 0) return;
     hot_ = -1;
@@ -67,6 +70,7 @@ void DockTitleBar::leaveEvent(QEvent*) {
     update();
 }
 
+// 제목·고정/접기/닫기 버튼을 그린다
 void DockTitleBar::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
@@ -102,6 +106,7 @@ void DockTitleBar::paintEvent(QPaintEvent*) {
     p.setBrush(Qt::NoBrush);
 }
 
+// 버튼 클릭을 처리한다: 고정 토글, 접기 토글, 닫기, 그 외엔 제목줄 드래그로 패널 이동
 void DockTitleBar::mousePressEvent(QMouseEvent* e) {
     switch (buttonAt(e->pos())) {
     case 0: {
@@ -142,6 +147,7 @@ NavigatorPanel::NavigatorPanel(Document* doc, CanvasWidget* canvas, QWidget* par
     connect(canvas_, &CanvasWidget::zoomChanged, this, upd);
 }
 
+// 축소판(썸네일)이 패널 안에서 차지할 사각형을 계산한다 (비율 유지, 가운데 정렬)
 QRectF NavigatorPanel::thumbRect() const {
     const QSize s = doc_->size();
     const QRectF area(6, 6, width() - 12, height() - 12);
@@ -150,6 +156,7 @@ QRectF NavigatorPanel::thumbRect() const {
     return QRectF(area.center().x() - sz.width() / 2, area.center().y() - sz.height() / 2, sz.width(), sz.height());
 }
 
+// 전체 그림 축소판과 지금 보이는 영역 테두리를 그린다
 void NavigatorPanel::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.fillRect(rect(), palette().base());
@@ -165,12 +172,15 @@ void NavigatorPanel::paintEvent(QPaintEvent*) {
     p.drawRect(vr);
 }
 
+// 클릭/드래그한 위치에 해당하는 캔버스 지점으로 화면을 이동한다
 void NavigatorPanel::moveTo(const QPoint& pos) {
     const QRectF tr = thumbRect();
     const double sc = tr.width() / doc_->size().width();
     canvas_->centerOnImagePoint(QPointF((pos.x() - tr.x()) / sc, (pos.y() - tr.y()) / sc));
 }
+// 마우스를 누르면 그 위치로 화면을 이동한다
 void NavigatorPanel::mousePressEvent(QMouseEvent* e) { moveTo(e->pos()); }
+// 왼쪽 버튼을 누른 채 드래그하면 계속 화면을 이동한다
 void NavigatorPanel::mouseMoveEvent(QMouseEvent* e) {
     if (e->buttons() & Qt::LeftButton) moveTo(e->pos());
 }
@@ -501,6 +511,7 @@ FlipPanel::FlipPanel(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc
     connect(doc_, &Document::changed, this, [this] { cache_.clear(); update(); });
 }
 
+// 미리보기 영상이 패널 안에서 차지할 사각형을 계산한다 (비율 유지)
 QRect FlipPanel::previewRect() const {
     const QRect avail(6, 6, width() - 12, height() - 6 - 74);
     if (avail.width() < 20 || avail.height() < 20) return QRect();
@@ -508,6 +519,7 @@ QRect FlipPanel::previewRect() const {
     return QRect(QPoint(avail.x() + (avail.width() - s.width()) / 2, avail.y()), s);
 }
 
+// 플립 비교용으로 해당 프레임의 이미지를 가져온다 (작게 줄여서 캐시에 저장)
 QImage FlipPanel::frameImage(int f) {
     if (!cache_.contains(f)) {
         if (cache_.size() > 96) cache_.clear();
@@ -518,6 +530,7 @@ QImage FlipPanel::frameImage(int f) {
     return cache_.value(f);
 }
 
+// 플립(깜빡이 비교) 타이머가 호출하는 함수: 다음 프레임으로 넘기고 범위 끝에서 반복/핑퐁 처리
 void FlipPanel::tick() {
     const int a = std::min(from_->value(), to_->value()) - 1;
     const int b = std::max(from_->value(), to_->value()) - 1;
@@ -534,6 +547,7 @@ void FlipPanel::tick() {
     update();
 }
 
+// 미리보기 이미지와 아래쪽 진행 막대를 그린다
 void FlipPanel::paintEvent(QPaintEvent*) {
     QPainter p(this);
     const QRect r = previewRect();
@@ -551,6 +565,7 @@ void FlipPanel::paintEvent(QPaintEvent*) {
     p.drawText(QRect(r.left(), bar.bottom() + 2, r.width(), 16), Qt::AlignCenter, QString("프레임 %1 / %2").arg(flipFrame_ + 1).arg(doc_->frameCount()));
 }
 
+// 진행 막대의 클릭/드래그 위치를 프레임 번호로 변환해 이동한다
 void FlipPanel::scrubTo(const QPoint& pos) {
     const QRect r = previewRect();
     if (r.isEmpty()) return;
@@ -561,10 +576,12 @@ void FlipPanel::scrubTo(const QPoint& pos) {
     update();
 }
 
+// 마우스를 누르면 재생을 멈추고 그 위치의 프레임으로 이동한다
 void FlipPanel::mousePressEvent(QMouseEvent* e) {
     if (play_->isChecked()) play_->setChecked(false);
     scrubTo(e->pos());
 }
+// 왼쪽 버튼을 누른 채 드래그하면 계속 프레임을 훑어본다
 void FlipPanel::mouseMoveEvent(QMouseEvent* e) {
     if (e->buttons() & Qt::LeftButton) scrubTo(e->pos());
 }
@@ -672,6 +689,7 @@ BrushPanel::BrushPanel(QWidget* parent) : QWidget(parent) {
     if (buttons_[0]) buttons_[0]->setChecked(true);
 }
 
+// 별도로 다시 만들 내용이 없어 비워 둔 함수 (호출만 되면 된다)
 void BrushPanel::rebuild() {}
 
 // 패널 너비에 맞춰 한 줄에 놓는 프리셋 수를 바꾼다 (넓히면 자연스럽게 더 많이 보인다)
@@ -690,17 +708,20 @@ void BrushPanel::reflow() {
     }
 }
 
+// 패널 크기가 바뀌면 프리셋 버튼 배치를 다시 계산한다
 void BrushPanel::resizeEvent(QResizeEvent* e) {
     QWidget::resizeEvent(e);
     reflow();
 }
 
+// 지정한 프리셋 버튼을 선택 상태로 표시한다
 void BrushPanel::setCurrent(int row) {
     if (row < 0 || row >= buttons_.size() || !buttons_[row]) return;
     QSignalBlocker b(buttons_[row]);
     buttons_[row]->setChecked(true);
 }
 
+// 현재 그리기 색을 저장한다 (미리보기 등에 쓰인다)
 void BrushPanel::setColor(const QColor& c) {
     color_ = c;
 }

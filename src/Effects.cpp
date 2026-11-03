@@ -15,6 +15,7 @@ QImage mapStraight(const QImage& in, F f) {
     }
     return o.convertToFormat(QImage::Format_ARGB32_Premultiplied);
 }
+// 값을 0~255(픽셀 채널 범위) 안으로 자른다
 inline int clamp255(int v) { return std::clamp(v, 0, 255); }
 }
 

@@ -24,6 +24,11 @@ QImage scanClean(const QImage& scan, int threshold, int despeckle, QColor ink);
 // 타임시트 교환 형식(XDTS, 근사 구현) 내보내기
 bool exportXdts(const Document* doc, const QString& path, QString* error = nullptr);
 
+// After Effects 로 넘기기: 레이어마다 키 이미지를 PNG 시퀀스로, 레이어 구조·타이밍·카메라 키프레임을
+// 정보를 JSON 매니페스트(<baseName>_ae.json)로 지정한 폴더에 함께 내보낸다. AE 쪽 스크립트가 이 JSON을
+// 읽어 레이어를 자동으로 재구성할 수 있게 하는 용도.
+bool exportAfterEffects(const Document* doc, const QString& folder, const QString& baseName, bool useCamera, QString* error = nullptr);
+
 }
 
 // 간단한 스크립트 실행기 (ONY 자체 명령어)

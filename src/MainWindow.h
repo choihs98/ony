@@ -139,6 +139,8 @@ private:
     void importVideoDialog();
     void importPsdDialog();
     void exportPsdDialog();
+    void exportAfterEffectsDialog();
+    void licenseDialog();
     void newClip();
     void openPath(const QString& path);
     void setupAutosave();

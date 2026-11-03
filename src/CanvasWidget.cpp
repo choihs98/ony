@@ -37,6 +37,7 @@ void dilateMask(QVector<uchar>& m, int w, int h, int passes) {
 }
 }
 
+// 생성자: 문서 변경 신호에 맞춰 캐시를 무효화하고 다시 그리도록 연결한다
 CanvasWidget::CanvasWidget(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) {
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
@@ -61,6 +62,7 @@ CanvasWidget::CanvasWidget(Document* doc, QWidget* parent) : QWidget(parent), do
     connect(doc_, &Document::structureChanged, this, invalidate);
 }
 
+// 현재 도구를 바꾼다 (워프/스플라인 중이었다면 바꾸기 전에 확정한다)
 void CanvasWidget::setTool(Tool t) {
     if (tool_ == Tool::Warp && t != Tool::Warp) commitWarp();
     if (tool_ == Tool::Spline && t != Tool::Spline) {
@@ -72,6 +74,7 @@ void CanvasWidget::setTool(Tool t) {
     update();
 }
 
+// 라이트 테이블(이전/다음 프레임 비치기) 켜기/끄기
 void CanvasWidget::setLightTable(bool on) {
     lightTable_ = on;
     ltCache_.clear();
@@ -79,12 +82,14 @@ void CanvasWidget::setLightTable(bool on) {
     update();
 }
 
+// 카메라 시점으로 보기 켜기/끄기
 void CanvasWidget::setCameraView(bool on) {
     cameraView_ = on;
     cacheDirty_ = true;
     update();
 }
 
+// 캔버스 이미지의 왼쪽 위 모서리가 화면 어디에 있는지 계산한다 (확대·이동 반영)
 QPointF CanvasWidget::imageTopLeft() const {
     const QSize s = doc_->size();
     return QPointF((width() - s.width() * zoom_) / 2.0, (height() - s.height() * zoom_) / 2.0) + pan_;
@@ -101,6 +106,7 @@ QTransform CanvasWidget::viewRotation(bool inverse) const {
     return t;
 }
 
+// 화면 각도(뷰 회전)를 설정한다 (-180~180 범위로 정리)
 void CanvasWidget::setViewAngle(qreal deg) {
     // -180 ~ 180 으로 접어 둔다
     while (deg <= -180.0) deg += 360.0;
@@ -113,12 +119,14 @@ void CanvasWidget::setViewAngle(qreal deg) {
     emit viewChanged();
 }
 
+// 화면 좌표를 이미지 좌표로 변환한다 (뷰 회전·확대·이동을 모두 거꾸로 계산)
 QPointF CanvasWidget::toImage(const QPointF& p) const {
     // 화면 좌표를 먼저 거꾸로 돌린 뒤, 예전과 같은 셈을 한다
     const QPointF q = viewAngle_ == 0 ? p : viewRotation(true).map(p);
     return (q - imageTopLeft()) / zoom_;
 }
 
+// 화면 중심을 기준으로 확대/축소한다
 void CanvasWidget::zoomBy(qreal factor) {
     const QPointF wp(width() / 2.0, height() / 2.0);
     const QPointF ip = toImage(wp);
@@ -130,6 +138,7 @@ void CanvasWidget::zoomBy(qreal factor) {
     update();
 }
 
+// 창 크기에 맞춰 전체 그림이 보이도록 확대/축소한다
 void CanvasWidget::zoomFit() {
     const QSize s = doc_->size();
     if (width() < 40 || height() < 40) return;
@@ -139,6 +148,7 @@ void CanvasWidget::zoomFit() {
     update();
 }
 
+// 확대 배율을 100%로 되돌린다
 void CanvasWidget::zoomActual() {
     zoom_ = 1.0;
     pan_ = QPointF(0, 0);
@@ -146,6 +156,7 @@ void CanvasWidget::zoomActual() {
     update();
 }
 
+// 창 크기가 바뀌면, 처음 보여줄 때 한해 화면 맞춤을 적용한다
 void CanvasWidget::resizeEvent(QResizeEvent* e) {
     QWidget::resizeEvent(e);
     if (fitPending_ && width() > 100 && height() > 100) {
@@ -461,12 +472,14 @@ void CanvasWidget::paintEvent(QPaintEvent*) {
     }
 }
 
+// 지금 화면에 보이는 캔버스 영역을 이미지 좌표 사각형으로 계산한다
 QRectF CanvasWidget::visibleImageRect() const {
     const QPointF tl = toImage(QPointF(0, 0));
     const QPointF br = toImage(QPointF(width(), height()));
     return QRectF(tl, br).normalized();
 }
 
+// 지정한 이미지 좌표가 화면 가운데 오도록 이동한다
 void CanvasWidget::centerOnImagePoint(const QPointF& ip) {
     const QSize s = doc_->size();
     // imageTopLeft = widget 중심 + pan_ - image 크기/2 * zoom (pan_ 이 중심 오프셋일 때)
@@ -493,6 +506,7 @@ bool CanvasWidget::beginEdit(int layer) {
     return editKey_ >= 0;
 }
 
+// 편집을 확정하고 실행 취소에 기록한다 (beginEdit 과 짝)
 void CanvasWidget::commitEdit(const QString& text) {
     if (editLayer_ < 0 || editKey_ < 0) return;
     const QImage after = doc_->keyImage(editLayer_, editKey_);
@@ -518,15 +532,18 @@ QImage CanvasWidget::paperTexture() const {
     return paperTex_;
 }
 
+// 구버전 API — 지금은 쓰이지 않고 캐시 이미지만 돌려준다 (브러시 엔진은 Brush.cpp 로 옮겨졌다)
 const QImage& CanvasWidget::dab(int, int, const QColor&, bool) {
     return dabCache_.img; // 구 API (브러시 엔진은 Brush.cpp 로 이동)
 }
 
+// 획으로 번질 수 있는 여유분까지 포함해 다시 그려야 할 영역을 넓힌다
 void CanvasWidget::markDirty(const QRectF& r) {
     const double m = brush_.size * 1.2 + 8;
     dirty_ = dirty_.united(r.adjusted(-m, -m, m, m).toAlignedRect());
 }
 
+// 원근 가이드의 소실점 좌표를 가져온다 (지정 안 됐으면 기본 위치)
 QPointF CanvasWidget::vanishPoint(int i) const {
     const QSizeF s = doc_->size();
     if (i < 0 || i > 2) i = 0;
@@ -576,6 +593,7 @@ QVector<QTransform> CanvasWidget::symmetryTransforms() const {
     return v;
 }
 
+// 한 점을 찍는다 (대칭이 켜져 있으면 대칭 변환마다 하나씩)
 void CanvasWidget::stamp(const QPointF& pos, double pr) {
     const QColor c = tool_ == Tool::Eraser ? QColor(Qt::black) : colorA_;
     for (const QTransform& t : symmetryTransforms()) {
@@ -585,6 +603,7 @@ void CanvasWidget::stamp(const QPointF& pos, double pr) {
     }
 }
 
+// 두 점 사이를 이어서 찍는다 (대칭 변환마다 따로 처리)
 void CanvasWidget::stampAlong(const QPointF& a, const QPointF& b, double pa, double pb) {
     const QColor c = tool_ == Tool::Eraser ? QColor(Qt::black) : colorA_;
     const QVector<QTransform> ts = symmetryTransforms();
@@ -653,6 +672,7 @@ void CanvasWidget::flushStroke() {
     doc_->notifyChanged();
 }
 
+// 원근 가이드 선을 따라 점을 투영한다 (안내선에 붙여서 그리기용)
 void CanvasWidget::beginStroke(const QPointF& ip) {
     if (!beginEdit()) return;
     strokeBase_ = doc_->keyImage(editLayer_, editKey_);
@@ -688,6 +708,7 @@ void CanvasWidget::beginStroke(const QPointF& ip) {
     flushStroke();
 }
 
+// 지금 쓰는 도구가 그릴 때 쓰는 혼합 모드를 돌려준다
 void CanvasWidget::drawViaBuffer(const std::function<void(QPainter&)>& fn, const QString& text) {
     if (!beginEdit()) return;
     strokeBase_ = doc_->keyImage(editLayer_, editKey_);
@@ -931,6 +952,7 @@ void CanvasWidget::mousePressEvent(QMouseEvent* e) {
     update();
 }
 
+// 탭 입력(펜 태블릿) 이벤트를 처리한다
 void CanvasWidget::mouseMoveEvent(QMouseEvent* e) {
     if (panning_) {
         pan_ += QPointF(e->pos() - panLast_);
@@ -1031,6 +1053,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent* e) {
     }
 }
 
+// 마우스 눌림 이벤트를 처리한다 (도구별 분기)
 void CanvasWidget::mouseReleaseEvent(QMouseEvent* e) {
     if (panning_) {
         panning_ = false;
@@ -1145,6 +1168,7 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent* e) {
     update();
 }
 
+// 스포이트 도구: 클릭한 위치의 색을 추출해 A 색으로 설정한다
 void CanvasWidget::mouseDoubleClickEvent(QMouseEvent* e) {
     if (tool_ == Tool::Spline && e->button() == Qt::LeftButton) {
         if (splinePts_.size() >= 2 && splinePts_.last() == splinePts_[splinePts_.size() - 2]) splinePts_.removeLast();
@@ -1154,6 +1178,7 @@ void CanvasWidget::mouseDoubleClickEvent(QMouseEvent* e) {
     QWidget::mouseDoubleClickEvent(e);
 }
 
+// 선택 영역을 사각형으로 시작한다
 void CanvasWidget::tabletEvent(QTabletEvent* e) {
     pressure_ = std::clamp(double(e->pressure()), 0.0, 1.0);
     if (e->type() == QEvent::TabletRelease) pressure_ = 1.0;
@@ -1167,6 +1192,7 @@ void CanvasWidget::tabletEvent(QTabletEvent* e) {
     e->ignore(); // 마우스 이벤트로도 이어지게 한다
 }
 
+// 올가미 선택을 시작한다 (끌어서 자유 곡선으로 그리기)
 void CanvasWidget::setPenTilt(double angleDeg, double amount) {
     tiltAngle_ = angleDeg;
     tiltAmount_ = std::clamp(amount, 0.0, 1.0);
@@ -1190,6 +1216,7 @@ QPainterPath CanvasWidget::splinePath() const {
     return path;
 }
 
+// 다각형 선택을 시작한다 (클릭으로 점 추가)
 void CanvasWidget::commitSpline() {
     if (splinePts_.size() < 2) {
         splinePts_.clear();
@@ -1249,6 +1276,7 @@ void CanvasWidget::bucketFill(const QPoint& seed) {
     commitEdit(QStringLiteral("페인트통"));
 }
 
+// 마술봉 선택을 처리한다 (클릭한 색과 비슷한 영역을 선택)
 void CanvasWidget::ctgFill(const QPoint& seed) {
     const int lineLayer = doc_->currentLayer();
     const int colorLayer = lineLayer - 1;
@@ -1308,6 +1336,7 @@ void CanvasWidget::updateWarpPreview() {
     doc_->setKeyImage(warpLayer_, warpKey_, res);
 }
 
+// 리깅(핀 워프) 도구: 클릭 위치에 핀을 놓거나 기존 핀을 선택한다
 void CanvasWidget::commitWarp() {
     if (pins_.isEmpty() || warpKey_ < 0) return;
     updateWarpPreview();
@@ -1319,6 +1348,7 @@ void CanvasWidget::commitWarp() {
     update();
 }
 
+// 변형 도구: 선택 영역의 손잡이를 잡거나 새 변형을 시작한다
 void CanvasWidget::cancelWarp() {
     if (pins_.isEmpty() || warpKey_ < 0) return;
     doc_->setKeyImage(warpLayer_, warpKey_, warpBefore_);
@@ -1352,6 +1382,7 @@ void CanvasWidget::commitGradient(const QPointF& a, const QPointF& b) {
     emit strokeFinished();
 }
 
+// 그라디언트 도구: 시작점을 기록한다
 void CanvasWidget::commitText(const QPointF& at) {
     if (text_.text.isEmpty()) {
         emit message(QStringLiteral("넣을 글자가 없습니다 (도구 옵션에서 글자를 입력하세요)."));
@@ -1408,6 +1439,7 @@ void CanvasWidget::applySelectionClip(QPainter& p) const {
     p.setClipRegion(rgn);
 }
 
+// 마우스 이동 이벤트를 처리한다 (도구별 분기, 드래그 중 미리보기 갱신)
 void CanvasWidget::setSelectionMask(const QImage& mask) {
     if (mask.isNull()) {
         selValid_ = false;
@@ -1439,6 +1471,7 @@ void CanvasWidget::setSelectionMask(const QImage& mask) {
     emit selectionChanged();
 }
 
+// 획을 그리는 동안 마우스 이동에 따라 점을 계속 찍는다
 void CanvasWidget::setSelectionRect(const QRect& r) {
     const QRect c = r.intersected(QRect(QPoint(0, 0), doc_->size()));
     selMask_ = QImage();
@@ -1510,6 +1543,7 @@ void CanvasWidget::featherSelection(int px) {
     emit selectionChanged();
 }
 
+// 마우스 뗌 이벤트를 처리한다 (도구별로 그리기·선택 등을 확정한다)
 void CanvasWidget::invertSelection() {
     if (!selValid_) {
         selectAll();
@@ -1624,6 +1658,7 @@ void CanvasWidget::setSelectedVectorStroke(int i) {
     emit vectorStrokeSelected(vecSel_);
 }
 
+// 휠 이벤트를 처리한다 (확대/축소 또는 브러시 크기 조절)
 int CanvasWidget::vecHitPoint(const QPointF& ip, int* strokeOut) const {
     const QVector<VecStroke>* list = doc_->vectorStrokes(doc_->currentLayer(), doc_->currentFrame());
     if (!list) return -1;
@@ -1688,6 +1723,7 @@ void CanvasWidget::pickColorAt(const QPointF& ip) {
     emit message(QString("색 추출: %1").arg(out.name().toUpper()));
 }
 
+// 키 눌림 이벤트를 처리한다 (스페이스=화면 이동, 방향키 등 단축 동작)
 void CanvasWidget::clearSelectionArea() {
     if (!selValid_) return;
     const int l = doc_->currentLayer();
@@ -1710,6 +1746,7 @@ void CanvasWidget::clearSelectionArea() {
     commitEdit(QStringLiteral("선택 영역 지우기"));
 }
 
+// 키 뗌 이벤트를 처리한다
 void CanvasWidget::clearCurrent() {
     if (selValid_) {
         clearSelectionArea();
@@ -1726,6 +1763,7 @@ void CanvasWidget::clearCurrent() {
         QStringLiteral("이미지 지우기"));
 }
 
+// 핀 워프를 확정해서 실제 이미지에 적용한다
 void CanvasWidget::selectAll() {
     selRect_ = QRect(QPoint(0, 0), doc_->size());
     selMask_ = QImage();
@@ -1734,6 +1772,7 @@ void CanvasWidget::selectAll() {
     emit selectionChanged();
 }
 
+// 스플라인 선 그리기를 확정해서 실제 이미지에 적용한다
 void CanvasWidget::clearSelection() {
     selValid_ = false;
     selMask_ = QImage();
@@ -1743,6 +1782,7 @@ void CanvasWidget::clearSelection() {
     emit selectionChanged();
 }
 
+// 선택 영역을 비운다 (선택 해제)
 void CanvasWidget::wheelEvent(QWheelEvent* e) {
     const QPointF wp = e->position();
     const QPointF ip = toImage(wp);
@@ -1772,6 +1812,7 @@ void CanvasWidget::wheelEvent(QWheelEvent* e) {
     zoomAnim_->start();
 }
 
+// 지금 선택된 영역의 경계를 CanvasWidget 좌표로 가져온다
 void CanvasWidget::keyPressEvent(QKeyEvent* e) {
     if (e->key() == Qt::Key_Space && !e->isAutoRepeat()) {
         spaceDown_ = true;
@@ -1792,6 +1833,7 @@ void CanvasWidget::keyPressEvent(QKeyEvent* e) {
     }
 }
 
+// 현재 편집 중인 그림을 화면에 보이는 대로 이미지로 뽑아낸다 (뷰 회전은 반영하지 않는다)
 void CanvasWidget::keyReleaseEvent(QKeyEvent* e) {
     if (e->key() == Qt::Key_Space && !e->isAutoRepeat()) {
         spaceDown_ = false;

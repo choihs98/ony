@@ -1,5 +1,6 @@
 // 오프스크린 자체 테스트: 문서 모델, 효과, 캔버스 마우스 입력, 스크린샷.
 #include <QApplication>
+#include <QDir>
 #include <QFileInfo>
 #include <QFile>
 #include <QPainter>
@@ -15,6 +16,7 @@
 #include "Document.h"
 #include "EditExport.h"
 #include "RenderQueue.h"
+#include "License.h"
 #include "LipSync.h"
 #include "Effects.h"
 #include "Panels.h"
@@ -189,7 +191,7 @@ static void testV2() {
     CHECK(e.folderCount() == d.folderCount() && e.libraryCount() == 1 && e.layerCount() == d.layerCount());
     CHECK(e.hasCameraKey(10));
 
-    // 이전 이름(TVPX) 매직의 파일도 열린다
+    // 프로젝트 개명 이전 매직 값으로 저장된 옛날 파일도 열린다 (하위 호환)
     {
         QFile src(tmp.filePath("v2.ony"));
         CHECK(src.open(QIODevice::ReadOnly));
@@ -286,10 +288,41 @@ static void testExtras() {
     const QByteArray raw = xf.readAll();
     CHECK(raw.startsWith("exchangeDigitalTimeSheet Save Data\n"));
     CHECK(!QJsonDocument::fromJson(raw.mid(raw.indexOf('\n') + 1)).isNull());
+
+    // After Effects 내보내기: 레이어 PNG 시퀀스 + JSON 매니페스트
+    QTemporaryDir aeTmp;
+    CHECK(Extras::exportAfterEffects(&d, aeTmp.path(), "proj", false, nullptr));
+    QFile aeJson(QDir(aeTmp.path()).filePath("proj_ae.json"));
+    CHECK(aeJson.open(QIODevice::ReadOnly));
+    const QJsonDocument aeDoc = QJsonDocument::fromJson(aeJson.readAll());
+    CHECK(!aeDoc.isNull() && aeDoc.object().value("layers").toArray().size() == d.layerCount());
+    CHECK(aeDoc.object().value("fps").toInt() == d.fps());
+    const QJsonArray aeLayer1Keys = aeDoc.object().value("layers").toArray().at(1).toObject().value("keys").toArray();
+    CHECK(!aeLayer1Keys.isEmpty());
+    CHECK(QFile::exists(QDir(aeTmp.path()).filePath(aeLayer1Keys.first().toObject().value("file").toString())));
+
     d.setProxyDivisor(4);
     QImage pr = d.composite(0);
     CHECK(pr.size() == d.size());
     d.setProxyDivisor(1);
+}
+
+// 라이선스 서명(HMAC-SHA256) 로직: 네트워크 없이, 서버와 같은 공식으로 만든 서명이 맞아야 하고
+// 값이 하나라도 바뀌면 서명이 달라져야 한다 (위조 방지의 핵심 전제).
+static void testLicenseSignature() {
+    const QByteArray secret = License::kSharedSecretHex;
+    const QByteArray canon = "ONY-TEST-0000-0000-0000|machineabc|pro|2026-01-01T00:00:00Z|2026-01-15T00:00:00Z";
+    const QByteArray sig1 = License::hmacHex(canon, secret);
+    CHECK(sig1 == License::hmacHex(canon, secret)); // 같은 입력 -> 같은 서명 (결정적)
+    CHECK(sig1 != License::hmacHex(canon + "x", secret)); // 값이 바뀌면 서명도 달라짐
+    CHECK(sig1 != License::hmacHex(canon, QByteArray(secret).replace(0, 2, "00"))); // 비밀키가 다르면도 달라짐
+    CHECK(sig1.size() == 64); // SHA-256 HMAC 의 16진수 표현은 64자
+
+    // 등록된 적 없는 상태에서는 licensed == false 여야 한다
+    License::clearLicense();
+    const License::Status st = License::currentStatus();
+    CHECK(!st.licensed);
+    CHECK(st.licenseKey.isEmpty());
 }
 
 static void testClipsAndPlay(MainWindow& w) {
@@ -3047,6 +3080,7 @@ int main(int argc, char** argv) {
     w.resize(1600, 900);
     w.show();
     QTest::qWait(200);
+    testLicenseSignature();
     testClipsAndPlay(w);
     testCanvasRotation(w);
     testResizeAndNext(w);

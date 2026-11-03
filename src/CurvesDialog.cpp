@@ -24,12 +24,14 @@ CurveWidget::CurveWidget(QWidget* parent) : QWidget(parent) {
     reset();
 }
 
+// 곡선을 양 끝 점만 있는 기본(직선) 상태로 되돌린다
 void CurveWidget::reset() {
     pts_ = {QPointF(0, 0), QPointF(1, 1)};
     update();
     emit curveChanged();
 }
 
+// 곡선 조절점들을 통째로 지정한다 (x 기준으로 정렬해 둔다)
 void CurveWidget::setPoints(const QVector<QPointF>& p) {
     pts_ = p;
     if (pts_.size() < 2) reset();
@@ -38,11 +40,13 @@ void CurveWidget::setPoints(const QVector<QPointF>& p) {
     emit curveChanged();
 }
 
+// 곡선 좌표(0~1 범위)를 위젯 화면 좌표로 변환한다
 QPointF CurveWidget::toWidget(const QPointF& p) const {
     const double m = 8;
     return QPointF(m + p.x() * (width() - 2 * m), (height() - m) - p.y() * (height() - 2 * m));
 }
 
+// 위젯 화면 좌표를 곡선 좌표(0~1 범위)로 변환한다
 QPointF CurveWidget::toCurve(const QPointF& p) const {
     const double m = 8;
     return QPointF(std::clamp((p.x() - m) / std::max(1.0, width() - 2 * m), 0.0, 1.0),
@@ -78,12 +82,14 @@ QVector<int> CurveWidget::lut() const {
     return out;
 }
 
+// 화면 좌표에서 가까운 조절점을 찾는다 (없으면 -1)
 int CurveWidget::pickPoint(const QPointF& wp) const {
     for (int i = 0; i < pts_.size(); ++i)
         if (QLineF(toWidget(pts_[i]), wp).length() < 9.0) return i;
     return -1;
 }
 
+// 곡선·격자·히스토그램·조절점을 그린다
 void CurveWidget::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
@@ -125,6 +131,7 @@ void CurveWidget::paintEvent(QPaintEvent*) {
     for (const QPointF& pt : pts_) p.drawEllipse(toWidget(pt), 4, 4);
 }
 
+// 마우스 클릭 처리: 빈 곳을 클릭하면 점 추가, 점을 클릭하면 선택(드래그 시작), 오른쪽 클릭은 점 삭제
 void CurveWidget::mousePressEvent(QMouseEvent* e) {
     const QPointF wp = e->position();
     int i = pickPoint(wp);
@@ -146,6 +153,7 @@ void CurveWidget::mousePressEvent(QMouseEvent* e) {
     update();
 }
 
+// 드래그 중인 점을 마우스 위치로 옮긴다 (양 끝 점과 이웃 점 범위 안에서만)
 void CurveWidget::mouseMoveEvent(QMouseEvent* e) {
     if (drag_ < 0 || drag_ >= pts_.size()) return;
     QPointF c = toCurve(e->position());
@@ -161,8 +169,10 @@ void CurveWidget::mouseMoveEvent(QMouseEvent* e) {
     emit curveChanged();
 }
 
+// 드래그 상태를 끝낸다
 void CurveWidget::mouseReleaseEvent(QMouseEvent*) { drag_ = -1; }
 
+// 더블클릭하면 곡선을 기본 상태로 되돌린다
 void CurveWidget::mouseDoubleClickEvent(QMouseEvent*) { reset(); }
 
 // ---------------------------------------------------------------- ColorAdjustDialog
@@ -270,6 +280,7 @@ static QVector<int> lutFrom(const QVector<QPointF>& pts, const QVector<int>& bas
     return out;
 }
 
+// 빨강 채널에 적용할 변환표(LUT)를 계산한다
 QVector<int> ColorAdjustDialog::lutR() const {
     QVector<int> base(256);
     for (int i = 0; i < 256; ++i) base[i] = i;
@@ -279,6 +290,7 @@ QVector<int> ColorAdjustDialog::lutR() const {
     return lutFrom(ptsR_, a.lut());
 }
 
+// 초록 채널에 적용할 변환표(LUT)를 계산한다
 QVector<int> ColorAdjustDialog::lutG() const {
     QVector<int> base(256);
     for (int i = 0; i < 256; ++i) base[i] = i;
@@ -288,6 +300,7 @@ QVector<int> ColorAdjustDialog::lutG() const {
     return lutFrom(ptsG_, a.lut());
 }
 
+// 파랑 채널에 적용할 변환표(LUT)를 계산한다
 QVector<int> ColorAdjustDialog::lutB() const {
     QVector<int> base(256);
     for (int i = 0; i < 256; ++i) base[i] = i;
@@ -297,6 +310,7 @@ QVector<int> ColorAdjustDialog::lutB() const {
     return lutFrom(ptsB_, a.lut());
 }
 
+// 현재 설정(레벨/커브)으로 결과 이미지를 다시 계산하고 미리보기를 갱신한다
 void ColorAdjustDialog::recompute() {
     if (levelsMode_) {
         result_ = Effects::levels(src_, inLow_->value(), inHigh_->value(), gamma_->value(), outLow_->value(), outHigh_->value());

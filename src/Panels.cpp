@@ -48,10 +48,12 @@ void MainPanel::selectTool(int id) {
     if (auto* b = group_ ? group_->button(id) : nullptr) b->click();
 }
 
+// 브러시 크기를 지정한 만큼 늘리거나 줄인다 (단축키 [ ] 용)
 void ToolPanel::bumpSize(int delta) {
     size_->setValue(std::clamp(size_->value() + delta, size_->minimum(), size_->maximum()));
 }
 
+// 메인 도구 패널을 만든다 (도구 버튼 격자 + 카메라/지우기/보정/기록/종이/스텐실 단추)
 MainPanel::MainPanel(QWidget* parent) : QWidget(parent) {
     auto* lay = new QVBoxLayout(this);
     lay->setContentsMargins(4, 4, 4, 4);
@@ -118,12 +120,17 @@ ColorWheel::ColorWheel(QWidget* parent) : QWidget(parent) {
     setMouseTracking(false);
 }
 
+// 색상환의 중심 좌표를 계산한다
 QPointF ColorWheel::center() const { return QPointF(width() / 2.0, height() / 2.0); }
+// 색상환의 바깥 반지름(색조 고리)을 계산한다
 double ColorWheel::outer() const { return std::min(width(), height()) / 2.0 - 3; }
+// 색상환의 안쪽 반지름(채도/명도 삼각형 경계)을 계산한다
 double ColorWheel::inner() const { return outer() * 0.78; }
 
+// 지금 선택된 색조/채도/명도 값으로 실제 QColor 를 만든다
 QColor ColorWheel::color() const { return QColor::fromHsvF(std::fmod(h_, 360.0) / 360.0, std::clamp(s_, 0.0, 1.0), std::clamp(v_, 0.0, 1.0)); }
 
+// 외부에서 전달받은 색으로 색조/채도/명도를 맞춘다
 void ColorWheel::setColor(const QColor& c) {
     float h, s, v;
     c.getHsvF(&h, &s, &v);
@@ -133,6 +140,7 @@ void ColorWheel::setColor(const QColor& c) {
     update();
 }
 
+// 채도/명도 삼각형의 세 꼭짓점(색조/흰색/검정) 좌표를 계산한다
 void ColorWheel::triPoints(QPointF& pHue, QPointF& pWhite, QPointF& pBlack) const {
     const double r = inner() - 3;
     const double a = h_ * M_PI / 180.0;
@@ -143,6 +151,7 @@ void ColorWheel::triPoints(QPointF& pHue, QPointF& pWhite, QPointF& pBlack) cons
     pBlack = at(a + 4.0 * M_PI / 3.0);
 }
 
+// 색상환 전체를 이미지로 미리 그려 캐시에 저장한다 (고리 + 삼각형, 매번 다시 그리면 느리다)
 void ColorWheel::rebuild() {
     cache_ = QImage(size(), QImage::Format_ARGB32_Premultiplied);
     cache_.fill(Qt::transparent);
@@ -182,8 +191,10 @@ void ColorWheel::rebuild() {
     cacheH_ = h_;
 }
 
+// 크기가 바뀌면 캐시를 무효화해서 다음에 다시 그리게 한다
 void ColorWheel::resizeEvent(QResizeEvent*) { cacheH_ = -1; }
 
+// 캐시된 색상환 이미지를 그리고, 그 위에 색조/채도·명도 위치 표시를 그린다
 void ColorWheel::paintEvent(QPaintEvent*) {
     if (cacheH_ != h_ || cache_.size() != size()) rebuild();
     QPainter p(this);
@@ -210,6 +221,7 @@ void ColorWheel::paintEvent(QPaintEvent*) {
     p.drawEllipse(sp, 6, 6);
 }
 
+// 클릭/드래그 위치가 고리인지 삼각형인지 판단해서 색조 또는 채도·명도를 갱신한다
 void ColorWheel::handle(const QPointF& pos, bool press) {
     const QPointF c = center();
     const double dx = pos.x() - c.x(), dy = c.y() - pos.y();
@@ -244,12 +256,15 @@ void ColorWheel::handle(const QPointF& pos, bool press) {
     emit colorChanged(color());
 }
 
+// 마우스 누름: 색상환 조작을 시작한다
 void ColorWheel::mousePressEvent(QMouseEvent* e) {
     if (e->button() == Qt::LeftButton) handle(e->position(), true);
 }
+// 마우스 이동: 누른 채 끄는 동안 계속 색을 갱신한다
 void ColorWheel::mouseMoveEvent(QMouseEvent* e) {
     if (e->buttons() & Qt::LeftButton) handle(e->position(), false);
 }
+// 마우스 뗌: 색상환 조작을 끝낸다
 void ColorWheel::mouseReleaseEvent(QMouseEvent*) { drag_ = Drag::None; }
 
 // ---------------- ColorPanel ----------------
@@ -312,12 +327,14 @@ ColorPanel::ColorPanel(QWidget* parent) : QWidget(parent) {
     refresh();
 }
 
+// A 색상을 설정한다
 void ColorPanel::setColorA(const QColor& c) {
     a_ = c;
     refresh();
     emit colorAChanged(a_);
 }
 
+// 기본 색상 견본 16개를 반환한다
 QVector<QColor> ColorPanel::defaultPalette() {
     return {QColor("#000000"), QColor("#ffffff"), QColor("#808080"), QColor("#c0c0c0"),
             QColor("#e53935"), QColor("#fb8c00"), QColor("#fdd835"), QColor("#43a047"),
@@ -325,6 +342,7 @@ QVector<QColor> ColorPanel::defaultPalette() {
             QColor("#6d4c41"), QColor("#ffcc80"), QColor("#a5d6a7"), QColor("#90caf9")};
 }
 
+// 색상 견본 격자를 다시 그린다 (+ 버튼 포함)
 void ColorPanel::rebuildSwatches() {
     if (!swatchGrid_) return;
     while (QLayoutItem* it = swatchGrid_->takeAt(0)) {
@@ -358,6 +376,7 @@ void ColorPanel::rebuildSwatches() {
     swatchGrid_->addWidget(add, swatches_.size() / 8, swatches_.size() % 8);
 }
 
+// 색상 견본 목록을 통째로 바꾼다 (최대 200개, 비어 있으면 기본값 사용)
 void ColorPanel::setSwatches(const QVector<QColor>& cols) {
     swatches_.clear();
     for (const QColor& c : cols)
@@ -366,12 +385,14 @@ void ColorPanel::setSwatches(const QVector<QColor>& cols) {
     rebuildSwatches();
 }
 
+// A/B 색상을 서로 바꾼다
 void ColorPanel::swapColors() {
     std::swap(a_, b_);
     refresh();
     emit colorAChanged(a_);
 }
 
+// A/B 색상 버튼·색상환·RGB 표시를 지금 값으로 갱신한다
 void ColorPanel::refresh() {
     btnA_->setStyleSheet(QString("background:%1;border:2px solid #d8d8d8;").arg(a_.name()));
     btnB_->setStyleSheet(QString("background:%1;border:1px solid #222;").arg(b_.name()));
@@ -611,6 +632,7 @@ ToolPanel::ToolPanel(QWidget* parent) : QWidget(parent) {
     syncIcons(0);
 }
 
+// 프리셋 목록 선택에 맞춰 아이콘 버튼들의 선택 표시를 맞춘다
 void ToolPanel::syncIcons(int row) {
     for (int i = 0; i < icons_.size(); ++i) {
         QSignalBlocker b(icons_[i]);
@@ -618,6 +640,7 @@ void ToolPanel::syncIcons(int row) {
     }
 }
 
+// 지금 화면에 설정된 브러시 값들을 모아 BrushParams 로 반환한다
 BrushParams ToolPanel::params() const {
     BrushParams p;
     p.size = size_->value();
@@ -636,6 +659,7 @@ BrushParams ToolPanel::params() const {
     return p;
 }
 
+// 외부에서 받은 브러시 값으로 화면의 모든 조절 항목을 맞춘다
 void ToolPanel::setParams(const BrushParams& p) {
     QSignalBlocker b1(size_), b2(opacity_), b3(hardness_), b4(pressure_), b5(sizeV_), b6(opacityV_), b7(hardnessV_);
     size_->setValue(p.size);
@@ -677,12 +701,14 @@ void ToolPanel::refreshCustomBrushes() {
     customRow_->setCurrentIndex(ci >= 0 ? ci : 0);
 }
 
+// 프리셋 목록에서 지정한 행을 선택 상태로 만든다 (아이콘도 함께 맞춘다)
 void ToolPanel::setRow(int row) {
     QSignalBlocker b(list_);
     list_->setCurrentRow(row);
     syncIcons(row);
 }
 
+// 프리셋을 선택한다 (이미 선택된 프리셋이면 도구만 다시 맞춘다)
 void ToolPanel::selectPreset(int row) {
     if (list_->currentRow() == row) { // 이미 선택된 프리셋이어도 도구(펜/지우개)는 다시 맞춘다
         emit brushSelected(row);
@@ -691,6 +717,7 @@ void ToolPanel::selectPreset(int row) {
     list_->setCurrentRow(row); // currentRowChanged 로 크기/불투명도 등도 함께 바뀐다
 }
 
+// 지금 값으로 신호를 보내고, 필압 설정은 다음에 켤 때도 쓰도록 저장해 둔다
 void ToolPanel::emitParams() {
     const BrushParams p = params();
     if (prPreview_) prPreview_->setParams(p);
@@ -711,11 +738,13 @@ PressurePreview::PressurePreview(QWidget* parent) : QWidget(parent) {
     setMinimumHeight(36);
 }
 
+// 미리보기에 쓸 브러시 값을 설정한다
 void PressurePreview::setParams(const BrushParams& p) {
     p_ = p;
     update();
 }
 
+// 필압에 따라 굵기·진하기가 어떻게 바뀌는지 살짝→꾹 순서로 미리보기를 그린다
 void PressurePreview::paintEvent(QPaintEvent*) {
     QPainter g(this);
     g.setRenderHint(QPainter::Antialiasing, true);
@@ -802,6 +831,7 @@ LayerStackPanel::LayerStackPanel(Document* doc, QWidget* parent) : QWidget(paren
     rebuild();
 }
 
+// 레이어 목록을 문서 상태에 맞춰 다시 만든다
 void LayerStackPanel::rebuild() {
     QSignalBlocker b1(list_);
     list_->clear();
@@ -822,6 +852,7 @@ void LayerStackPanel::rebuild() {
     syncSelection();
 }
 
+// 지금 선택된 레이어·불투명도 값에 맞춰 목록 선택과 슬라이더를 맞춘다
 void LayerStackPanel::syncSelection() {
     QSignalBlocker b1(list_);
     QSignalBlocker b2(opacity_);
@@ -854,6 +885,7 @@ TimesheetPanel::TimesheetPanel(Document* doc, QWidget* parent) : QWidget(parent)
     rebuild();
 }
 
+// 타임시트 표를 프레임·레이어 수에 맞춰 다시 만든다
 void TimesheetPanel::rebuild() {
     syncing_ = true;
     const int frames = doc_->frameCount();
@@ -960,6 +992,7 @@ FxPanel::FxPanel(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) {
     rebuild();
 }
 
+// 현재 레이어에 걸린 효과(FX) 목록을 다시 보여준다
 void FxPanel::rebuild() {
     const Layer& L = doc_->layer(doc_->currentLayer());
     title_->setText(QString("레이어: %1").arg(L.name));
@@ -1032,10 +1065,12 @@ CameraPanel::CameraPanel(Document* doc, QWidget* parent) : QWidget(parent), doc_
     sync();
 }
 
+// 켜짐 상태 체크박스를 외부 값에 맞춘다 (신호가 중복으로 안 나가게)
 void CameraPanel::setEnabledChecked(bool on) {
     if (enable_->isChecked() != on) enable_->setChecked(on);
 }
 
+// 화면의 X/Y/배율/회전 값으로 현재 프레임에 카메라 키를 만든다
 void CameraPanel::apply() {
     if (syncing_) return;
     if (!doc_->cameraEnabled()) doc_->setCameraEnabled(true);
@@ -1048,6 +1083,7 @@ void CameraPanel::apply() {
     doc_->setCameraKey(doc_->currentFrame(), k);
 }
 
+// 현재 프레임의 카메라 값으로 화면 전체(조절값·키 목록)를 맞춘다
 void CameraPanel::sync() {
     syncing_ = true;
     const CameraKey k = doc_->cameraAt(doc_->currentFrame());
@@ -1172,6 +1208,7 @@ LibraryPanel::LibraryPanel(Document* doc, QWidget* parent) : QWidget(parent), do
     rebuild();
 }
 
+// 검색어·분류 조건에 맞춰 라이브러리 목록을 다시 만든다
 void LibraryPanel::rebuild() {
     const QString q = search_ ? search_->text().trimmed() : QString();
     const QString pickedCat = (cat_ && cat_->currentIndex() > 0) ? cat_->currentText() : QString();

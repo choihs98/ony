@@ -41,8 +41,10 @@ static const Scheme kSchemes[] = {
      QColor(0x55, 0x5a, 0x63), QColor(0xd3, 0xd5, 0xdb), QColor(0x3d, 0x7f, 0xd0), QColor(0xb0, 0xb3, 0xbb)}, // 새벽
 };
 
+// 고를 수 있는 배색 테마(낮/밤/황혼 등) 개수를 반환한다
 int schemeCount() { return int(std::size(kSchemes)); }
 
+// 번호에 해당하는 배색 테마를 반환한다
 const Scheme& scheme(int index) { return kSchemes[std::clamp(index, 0, schemeCount() - 1)]; }
 
 QString schemeName(int index) {

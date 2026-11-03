@@ -8,6 +8,7 @@
 #include "Warp.h"
 
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QFile>
 #include <QFileDialog>
 #include <QFormLayout>
@@ -131,6 +132,75 @@ bool exportXdts(const Document* doc, const QString& path, QString* error) {
     return true;
 }
 
+// After Effects 로 넘기기: 레이어별로 키 이미지만 PNG로 뽑아 레이어 전용 폴더에 저장하고,
+// 레이어 이름·순서·불투명도·블렌드모드·타임라인 옵션과(선택 시) 카메라 키프레임을 JSON 매니페스트로 함께 적는다.
+bool exportAfterEffects(const Document* doc, const QString& folder, const QString& baseName, bool useCamera, QString* error) {
+    QDir dir(folder);
+    if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
+        if (error) *error = QStringLiteral("폴더를 만들 수 없습니다.");
+        return false;
+    }
+    QJsonArray layersJson;
+    const int n = doc->layerCount();
+    for (int l = 0; l < n; ++l) {
+        const Layer& lay = doc->layer(l);
+        // 레이어마다 자기 폴더에 "레이어이름_프레임번호.png" 로 키 이미지만 저장 (홀드 구간은 AE 쪽에서 inOut 으로 처리)
+        const QString layerDir = QString("layer%1_%2").arg(l + 1, 2, 10, QChar('0')).arg(lay.name);
+        dir.mkpath(layerDir);
+        QJsonArray keysJson;
+        for (int f = 0; f < doc->frameCount(); ++f) {
+            if (lay.frames[f].isNull()) continue; // 키가 아니면(홀드 중) 건너뜀
+            const QString fileName = QString("%1_%2.png").arg(lay.name).arg(f + 1, 4, 10, QChar('0'));
+            if (!lay.frames[f].save(dir.filePath(layerDir + "/" + fileName), "PNG")) continue;
+            keysJson.append(QJsonObject{{"frame", f}, {"file", layerDir + "/" + fileName}});
+        }
+        layersJson.append(QJsonObject{
+            {"index", l},
+            {"name", lay.name},
+            {"visible", lay.visible},
+            {"opacity", lay.opacity},
+            {"blendMode", Blend::englishName(lay.blend)},
+            {"folder", lay.folder},
+            {"preBehavior", lay.preBehavior},   // 0 없음, 1 반복, 2 핑퐁, 3 정지(홀드)
+            {"postBehavior", lay.postBehavior},
+            {"endFrame", lay.endFrame},
+            {"camFollowPercent", lay.camFollow}, // 멀티플레인: 카메라를 얼마나 따라가는지(%)
+            {"keys", keysJson},
+        });
+    }
+    // 카메라 키프레임(사용할 경우에만): AE 쪽에서 널(Null) 레이어 트랜스폼 키로 그대로 옮길 수 있는 형태
+    QJsonArray cameraJson;
+    const bool camOn = useCamera && doc->cameraEnabled();
+    if (camOn) {
+        const auto& ck = doc->cameraKeys();
+        for (auto it = ck.cbegin(); it != ck.cend(); ++it) {
+            const CameraKey& k = it.value();
+            cameraJson.append(QJsonObject{
+                {"frame", it.key()}, {"x", k.x}, {"y", k.y}, {"scale", k.scale}, {"rotation", k.rotation}, {"ease", k.ease}
+            });
+        }
+    }
+    const QJsonObject root{
+        {"formatVersion", 1},
+        {"generator", QStringLiteral("ONY")},
+        {"project", baseName},
+        {"fps", doc->fps()},
+        {"frameCount", doc->frameCount()},
+        {"width", doc->renderSize().width()},
+        {"height", doc->renderSize().height()},
+        {"cameraEnabled", camOn},
+        {"cameraKeys", cameraJson},
+        {"layers", layersJson},
+    };
+    QFile f(dir.filePath(baseName + QStringLiteral("_ae.json")));
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        if (error) *error = f.errorString();
+        return false;
+    }
+    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    return true;
+}
+
 } // namespace Extras
 
 // ---------------------------------------------------------------- 스크립트
@@ -185,6 +255,7 @@ QString ScriptEngine::help() {
         "  select.grow N | select.feather N | color A #rrggbb | tool 이름 | zoom N | msg 문장");
 }
 
+// 현재 선택된 키 이미지를 함수로 고치고 실행 취소에 기록한다 (스크립트의 그리기 명령용)
 bool ScriptEngine::drawOnCurrent(const std::function<void(QImage&)>& fn) {
     const int l = doc_->currentLayer(), f = doc_->currentFrame();
     if (doc_->layer(l).locked) return false;
@@ -196,6 +267,7 @@ bool ScriptEngine::drawOnCurrent(const std::function<void(QImage&)>& fn) {
     return true;
 }
 
+// 스크립트 전체를 한 줄씩 실행한다
 QString ScriptEngine::run(const QString& script) {
     QStringList lines = script.split('\n');
     steps_ = 0;
@@ -234,6 +306,7 @@ int ScriptEngine::matchEnd(const QStringList& lines, int start, int to) const {
     return -1;
 }
 
+// 지정된 줄 구간(블록)을 실행한다 (if/while/for 재귀 처리, 깊이 제한 있음)
 QString ScriptEngine::runBlock(const QStringList& lines, int from, int to, int depth) {
     if (depth > 16) return QStringLiteral("블록이 너무 깊습니다\n");
     QString log;
@@ -510,6 +583,7 @@ struct Expr {
 };
 }
 
+// 수식 문자열을 계산해 숫자 값으로 돌려준다
 double ScriptEngine::eval(const QString& expr) const {
     Expr e;
     e.s = expand(expr);
@@ -549,6 +623,7 @@ static const QHash<QString, QString>& longNameAliases() {
     return m;
 }
 
+// 한 줄을 해석해서 명령을 실행한다 (ony_ 긴 이름은 먼저 짧은 명령으로 바꾼다)
 QString ScriptEngine::runLine(const QString& rawLine, int depth) {
     if (depth > 16) return QStringLiteral("너무 깊습니다");
     QString line = expand(rawLine);
@@ -773,6 +848,7 @@ QString ScriptEngine::runLine(const QString& rawLine, int depth) {
     return QStringLiteral("알 수 없는 명령: %1").arg(t[0]);
 }
 
+// 스크립트 콘솔 창을 만든다 (입력창·실행/도움말/열기/저장 버튼·출력창)
 ScriptConsole::ScriptConsole(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) {
     auto* lay = new QVBoxLayout(this);
     lay->setContentsMargins(4, 4, 4, 4);
@@ -858,6 +934,7 @@ CustomPanel::CustomPanel(Document* doc, const CustomPanelDef& def, QWidget* pare
     applyGeometry();
 }
 
+// 저장된 배치 정보대로 버튼들의 위치·크기를 적용한다
 void CustomPanel::applyGeometry() {
     const int top = 52;
     for (int i = 0; i < buttons_.size(); ++i) {
@@ -870,6 +947,7 @@ void CustomPanel::applyGeometry() {
     }
 }
 
+// 지금 버튼들의 위치·크기를 배치 정보로 저장한다
 void CustomPanel::storeGeometry() {
     def_.geoms.clear();
     for (QPushButton* b : buttons_) {
@@ -879,6 +957,7 @@ void CustomPanel::storeGeometry() {
     emit layoutChanged(def_);
 }
 
+// 버튼들을 세로로 가지런히 자동 정렬한다
 void CustomPanel::autoArrange() {
     const int top = 52;
     for (int i = 0; i < buttons_.size(); ++i)
@@ -887,6 +966,7 @@ void CustomPanel::autoArrange() {
     update();
 }
 
+// 배치 편집 모드를 켜고 끈다 (버튼 끌어서 옮기기/크기 조절 가능 여부)
 void CustomPanel::setEditing(bool on) {
     editing_ = on;
     if (editBox_ && editBox_->isChecked() != on) {
@@ -898,12 +978,14 @@ void CustomPanel::setEditing(bool on) {
     update();
 }
 
+// 패널 크기가 바뀌면, 저장된 배치가 없을 때만 버튼 폭을 다시 맞춘다
 void CustomPanel::resizeEvent(QResizeEvent* e) {
     QWidget::resizeEvent(e);
     // 저장된 배치가 없을 때만 폭을 따라간다
     if (def_.geoms.isEmpty()) applyGeometry();
 }
 
+// 편집 모드에서 버튼을 끌어 옮기거나 크기를 바꾸는 마우스 동작을 처리한다
 bool CustomPanel::eventFilter(QObject* o, QEvent* e) {
     if (!editing_) return QWidget::eventFilter(o, e);
     auto* b = qobject_cast<QPushButton*>(o);
@@ -939,6 +1021,7 @@ bool CustomPanel::eventFilter(QObject* o, QEvent* e) {
     return QWidget::eventFilter(o, e);
 }
 
+// 편집 모드일 때 버튼 둘레에 점선 테두리를 그린다
 void CustomPanel::paintEvent(QPaintEvent*) {
     if (!editing_) return;
     QPainter p(this);
@@ -1038,6 +1121,7 @@ StoryboardPanel::StoryboardPanel(Document* doc, QWidget* parent) : QWidget(paren
     rebuild();
 }
 
+// 그림이 있거나 메모가 있는 프레임들을 모아 스토리보드 목록을 다시 만든다
 void StoryboardPanel::rebuild() {
     list_->clear();
     QSet<int> starts;
@@ -1127,23 +1211,28 @@ BoneWarpDialog::BoneWarpDialog(const QImage& img, QWidget* parent) : QDialog(par
     bb->raise();
 }
 
+// 지금까지 놓은 뼈대로 변형한 최종 이미지를 계산한다
 QImage BoneWarpDialog::result() const { return Warp::boneWarp(img_, bones_, followNearest_); }
 
+// 그림이 패널 안에서 차지할 사각형을 계산한다 (비율 유지, 가운데 정렬)
 QRectF BoneWarpDialog::imageRect() const {
     const QRectF area(20, 44, width() - 40, height() - 100);
     const double s = std::min(area.width() / img_.width(), area.height() / img_.height());
     const QSizeF sz(img_.width() * s, img_.height() * s);
     return QRectF(area.center().x() - sz.width() / 2, area.center().y() - sz.height() / 2, sz.width(), sz.height());
 }
+// 이미지 좌표를 위젯 화면 좌표로 변환한다
 QPointF BoneWarpDialog::toWidget(const QPointF& i) const {
     const QRectF r = imageRect();
     return QPointF(r.x() + i.x() * r.width() / img_.width(), r.y() + i.y() * r.height() / img_.height());
 }
+// 위젯 화면 좌표를 이미지 좌표로 변환한다
 QPointF BoneWarpDialog::toImage(const QPointF& w) const {
     const QRectF r = imageRect();
     return QPointF((w.x() - r.x()) * img_.width() / r.width(), (w.y() - r.y()) * img_.height() / r.height());
 }
 
+// 화면 좌표에서 가까운 뼈의 손잡이(시작/끝점)를 찾는다
 int BoneWarpDialog::pickHandle(const QPointF& wp, bool* isEnd) const {
     for (int i = 0; i < bones_.size(); ++i) {
         if (QLineF(toWidget(bones_[i].da), wp).length() < 10) {
@@ -1158,6 +1247,7 @@ int BoneWarpDialog::pickHandle(const QPointF& wp, bool* isEnd) const {
     return -1;
 }
 
+// 마우스 누름: 기존 손잡이를 잡거나, 빈 곳이면 새 뼈 놓기를 시작한다
 void BoneWarpDialog::mousePressEvent(QMouseEvent* e) {
     if (e->button() != Qt::LeftButton) return;
     const QPointF wp = e->position();
@@ -1177,6 +1267,7 @@ void BoneWarpDialog::mousePressEvent(QMouseEvent* e) {
     update();
 }
 
+// 마우스 이동: 손잡이를 드래그 중이면 뼈 끝점을 따라 옮긴다
 void BoneWarpDialog::mouseMoveEvent(QMouseEvent* e) {
     const QPointF wp = e->position();
     hover_ = toImage(wp);
@@ -1187,6 +1278,7 @@ void BoneWarpDialog::mouseMoveEvent(QMouseEvent* e) {
     if (drag_ >= 0 || placing_) update();
 }
 
+// 마우스 뗌: 새 뼈 놓기를 끝내고 (너무 짧지 않으면) 뼈 목록에 추가한다
 void BoneWarpDialog::mouseReleaseEvent(QMouseEvent* e) {
     if (e->button() != Qt::LeftButton) return;
     if (placing_) {
@@ -1205,6 +1297,7 @@ void BoneWarpDialog::mouseReleaseEvent(QMouseEvent* e) {
     update();
 }
 
+// 그림(원본 또는 변형 미리보기)과 뼈대·영향 범위를 그린다
 void BoneWarpDialog::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.fillRect(rect(), palette().window());
@@ -1293,6 +1386,7 @@ MeshWarpDialog::MeshWarpDialog(const QImage& img, QWidget* parent) : QDialog(par
     bb->raise();
 }
 
+// 격자점들을 모두 초기 위치로 되돌린다
 void MeshWarpDialog::resetPoints() {
     pts_.clear();
     for (int r = 0; r <= rows_; ++r)
@@ -1301,6 +1395,7 @@ void MeshWarpDialog::resetPoints() {
     update();
 }
 
+// 격자 칸 수를 바꾼다 (기존에 옮겨둔 변형은 비율로 최대한 유지한다)
 void MeshWarpDialog::setGrid(int cols, int rows) {
     cols = std::clamp(cols, 1, 24);
     rows = std::clamp(rows, 1, 24);
@@ -1342,23 +1437,28 @@ void MeshWarpDialog::setGrid(int cols, int rows) {
     update();
 }
 
+// 그림이 패널 안에서 차지할 사각형을 계산한다 (비율 유지, 가운데 정렬)
 QRectF MeshWarpDialog::imageRect() const {
     const QRectF area(20, 20, width() - 40, height() - 80);
     const double s = std::min(area.width() / img_.width(), area.height() / img_.height());
     const QSizeF sz(img_.width() * s, img_.height() * s);
     return QRectF(area.center().x() - sz.width() / 2, area.center().y() - sz.height() / 2, sz.width(), sz.height());
 }
+// 이미지 좌표를 위젯 화면 좌표로 변환한다
 QPointF MeshWarpDialog::toWidget(const QPointF& i) const {
     const QRectF r = imageRect();
     return QPointF(r.x() + i.x() * r.width() / img_.width(), r.y() + i.y() * r.height() / img_.height());
 }
+// 위젯 화면 좌표를 이미지 좌표로 변환한다
 QPointF MeshWarpDialog::toImage(const QPointF& w) const {
     const QRectF r = imageRect();
     return QPointF((w.x() - r.x()) * img_.width() / r.width(), (w.y() - r.y()) * img_.height() / r.height());
 }
 
+// 지금까지 옮긴 격자점으로 변형한 최종 이미지를 계산한다
 QImage MeshWarpDialog::result() const { return Warp::meshWarp(img_, cols_, rows_, pts_); }
 
+// 그림(원본 또는 변형 미리보기)과 격자선·격자점을 그린다
 void MeshWarpDialog::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.fillRect(rect(), palette().window());
@@ -1381,6 +1481,7 @@ void MeshWarpDialog::paintEvent(QPaintEvent*) {
     for (const QPointF& pt : pts_) p.drawEllipse(toWidget(pt), 5, 5);
 }
 
+// 마우스 누름: 가장 가까운 격자점을 찾아 드래그 대상으로 잡는다
 void MeshWarpDialog::mousePressEvent(QMouseEvent* e) {
     drag_ = -1;
     double best = 144;
@@ -1390,11 +1491,13 @@ void MeshWarpDialog::mousePressEvent(QMouseEvent* e) {
         if (dd < best) { best = dd; drag_ = i; }
     }
 }
+// 마우스 이동: 잡은 격자점을 마우스 위치로 옮긴다
 void MeshWarpDialog::mouseMoveEvent(QMouseEvent* e) {
     if (drag_ < 0) return;
     pts_[drag_] = toImage(e->position());
     update();
 }
+// 마우스 뗌: 드래그를 끝내고 미리보기를 다시 계산한다
 void MeshWarpDialog::mouseReleaseEvent(QMouseEvent*) {
     if (drag_ >= 0) preview_ = result();
     drag_ = -1;

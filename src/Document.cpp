@@ -16,7 +16,7 @@
 
 namespace {
 constexpr quint32 kMagic = 0x4F4E5931;    // "ONY1"
-constexpr quint32 kLegacyMagic = 0x54565058; // 이전 이름의 파일("TVPX")도 열 수 있다
+constexpr quint32 kLegacyMagic = 0x54565058; // 프로젝트 개명 이전(과거 확장자 시절)에 저장된 파일의 매직 값 — 하위 호환을 위해 그대로 유지
 constexpr quint32 kVersion = 2;
 constexpr quint32 kExtMagic = 0x4F4E5845; // "ONXE"
 
@@ -33,11 +33,13 @@ private:
 };
 }
 
+// 생성자: 실행취소 스택을 만들고 기본 빈 프로젝트로 초기화한다
 Document::Document(QObject* parent) : QObject(parent), undo_(new QUndoStack(this)) {
     undo_->setUndoLimit(60);
     newProject(QSize(1280, 720), 48, 24);
 }
 
+// 레이어를 모두 비우고 지정한 이름의 레이어 하나로 초기화한다
 void Document::resetLayersTo(const QString& firstName) {
     layers_.clear();
     Layer l;
@@ -46,6 +48,7 @@ void Document::resetLayersTo(const QString& firstName) {
     layers_.push_back(l);
 }
 
+// 새 프로젝트를 시작한다: 캔버스 크기·프레임 수·FPS를 설정하고 문서 상태 전체를 기본값으로 되돌린다
 void Document::newProject(QSize size, int frameCount, int fps) {
     size_ = size;
     frameCount_ = std::max(1, frameCount);
@@ -81,11 +84,13 @@ void Document::newProject(QSize size, int frameCount, int fps) {
     emit modifiedChanged();
 }
 
+// 프레임 속도(FPS)를 설정한다
 void Document::setFps(int fps) {
     fps_ = std::max(1, fps);
     notifyStructure();
 }
 
+// 현재 선택된 레이어를 바꾼다
 void Document::setCurrentLayer(int l) {
     l = std::clamp(l, 0, layerCount() - 1);
     if (l == curLayer_) return;
@@ -93,6 +98,7 @@ void Document::setCurrentLayer(int l) {
     emit currentChanged();
 }
 
+// 현재 선택된 프레임을 바꾼다
 void Document::setCurrentFrame(int f) {
     f = std::clamp(f, 0, frameCount_ - 1);
     if (f == curFrame_) return;
@@ -109,6 +115,7 @@ int Document::keyIndexAt(int layer, int frame) const {
     return -1;
 }
 
+// 주어진 프레임 이후 가장 가까운 키 이미지의 인덱스를 찾는다
 int Document::nextKeyIndex(int layer, int frame) const {
     if (layer < 0 || layer >= layers_.size()) return -1;
     const auto& fr = layers_[layer].frames;
@@ -117,11 +124,13 @@ int Document::nextKeyIndex(int layer, int frame) const {
     return -1;
 }
 
+// 레이어의 특정 키 인덱스에 있는 이미지를 가져온다
 QImage Document::keyImage(int layer, int key) const {
     if (layer < 0 || layer >= layers_.size() || key < 0 || key >= frameCount_) return QImage();
     return layers_[layer].frames[key];
 }
 
+// 그리기용으로 수정 가능한 이미지 포인터를 반환한다 (해당 위치에 이미지가 없으면 새로 만든다)
 QImage* Document::editableImage(int layer, int frame) {
     if (layer < 0 || layer >= layers_.size()) return nullptr;
     int k = keyIndexAt(layer, frame);
@@ -136,12 +145,14 @@ QImage* Document::editableImage(int layer, int frame) {
     return &layers_[layer].frames[k];
 }
 
+// 레이어의 특정 키 인덱스에 이미지를 직접 설정한다
 void Document::setKeyImage(int layer, int key, const QImage& img) {
     if (layer < 0 || layer >= layers_.size() || key < 0 || key >= frameCount_) return;
     layers_[layer].frames[key] = img;
     notifyChanged();
 }
 
+// 노출(같은 그림을 유지하는 구간)을 한 프레임 늘린다
 bool Document::extendExposure(int layer, int frame) {
     if (layer < 0 || layer >= layers_.size() || frame < 0 || frame >= frameCount_) return false;
     auto& fr = layers_[layer].frames;
@@ -153,6 +164,7 @@ bool Document::extendExposure(int layer, int frame) {
     return true;
 }
 
+// 노출(같은 그림을 유지하는 구간)을 한 프레임 줄인다
 bool Document::shrinkExposure(int layer, int frame) {
     if (layer < 0 || layer >= layers_.size() || frame < 0 || frame + 1 >= frameCount_) return false;
     auto& fr = layers_[layer].frames;
@@ -173,6 +185,7 @@ int Document::firstKey(int layer) const {
     return -1;
 }
 
+// 레이어에서 마지막 키 이미지가 있는 프레임 번호를 찾는다
 int Document::lastKey(int layer) const {
     if (layer < 0 || layer >= layers_.size()) return -1;
     const auto& fr = layers_[layer].frames;
@@ -181,6 +194,7 @@ int Document::lastKey(int layer) const {
     return -1;
 }
 
+// 레이어 내용이 끝나는 프레임 번호를 계산한다 (프리/포스트 비헤이비어 계산의 기준이 됨)
 int Document::contentEnd(int l) const {
     if (l < 0 || l >= layers_.size()) return 0;
     const int first = firstKey(l);
@@ -191,6 +205,7 @@ int Document::contentEnd(int l) const {
     return std::clamp(lastKey(l) + 1, first + 1, frameCount_);
 }
 
+// 요청한 프레임에 실제로 보여줄 키 이미지의 인덱스를, 프리/포스트 비헤이비어 규칙(반복·핑퐁·정지)에 따라 계산한다
 int Document::resolveKey(int l, int f) const {
     if (l < 0 || l >= layers_.size() || f < 0 || f >= frameCount_) return -1;
     const Layer& L = layers_[l];
@@ -224,11 +239,13 @@ void Document::toggleBookmark(int frame) {
     notifyChanged();
 }
 
+// 모든 북마크를 지운다
 void Document::clearBookmarks() {
     bookmarks_.clear();
     notifyChanged();
 }
 
+// 지정한 방향으로 가장 가까운 북마크를 찾는다
 int Document::nearestBookmark(int from, int dir) const {
     int best = -1;
     for (int b : bookmarks_) {
@@ -238,11 +255,13 @@ int Document::nearestBookmark(int from, int dir) const {
     return best;
 }
 
+// 이미지 마크에 쓸 색상 목록을 설정한다
 void Document::setMarkColors(const QVector<MarkColor>& m) {
     markColors_ = m;
     notifyChanged();
 }
 
+// 특정 키 이미지에 색상 마크를 지정하거나 해제한다
 void Document::setImageMark(int layer, int frame, int colorIndex) {
     if (layer < 0 || layer >= layers_.size()) return;
     const int k = keyIndexAt(layer, frame);
@@ -252,6 +271,7 @@ void Document::setImageMark(int layer, int frame, int colorIndex) {
     notifyChanged();
 }
 
+// 색상 그룹 번호에 대응하는 실제 색상을 반환한다
 QColor Document::colorGroupColor(int i) {
     static const QColor c[] = {QColor("#e53935"), QColor("#fb8c00"), QColor("#fdd835"), QColor("#7cb342"),
                                QColor("#43a047"), QColor("#00acc1"), QColor("#1e88e5"), QColor("#3949ab"),
@@ -260,11 +280,13 @@ QColor Document::colorGroupColor(int i) {
     return c[std::clamp(i, 0, 15)];
 }
 
+// 색상 그룹 번호에 대응하는 이름을 반환한다
 QString Document::colorGroupName(int i) {
     static const char* n[] = {"빨강", "주황", "노랑", "연두", "초록", "청록", "파랑", "남색", "보라", "분홍", "갈색", "연갈색", "회청", "밝은 회색", "흰색", "검정"};
     return QString::fromUtf8(n[std::clamp(i, 0, 15)]);
 }
 
+// 다른 레이어의 스텐실(그리기 제한 영역) 설정을 모아 하나의 마스크 이미지로 만든다
 QImage Document::stencilMaskFor(int layer, int frame) const {
     QImage mask;
     for (int l = 0; l < layers_.size(); ++l) {
@@ -316,6 +338,7 @@ QImage Document::fxApplied(int layer, int key, const QImage& src) const {
     return out;
 }
 
+// 보이는 레이어들을 순서대로 합성 대상에 그린다 (블렌드 모드·멀티플레인 카메라·퍼핏 변형 반영)
 void Document::drawLayers(QImage& target, const QTransform& xf, int frame, const QRect& clip, bool multiplane) const {
     for (int l = 0; l < layers_.size(); ++l) {
         const Layer& L = layers_[l];
@@ -372,6 +395,7 @@ bool Document::compositeRegion(QImage& target, const QRect& region, int frame, b
     return true;
 }
 
+// 현재 프레임의 전체 합성 이미지를 만든다 (프록시 축소·카메라·멀티플레인까지 반영)
 QImage Document::composite(int frame, bool paper, bool useCamera) const {
     if (proxyDiv_ > 1) {
         const double sc = 1.0 / proxyDiv_;
@@ -424,6 +448,7 @@ int Document::addLayer(const QString& name) {
     return at;
 }
 
+// CTG(색/선화 분리) 레이어 쌍을 추가한다
 int Document::addCtgPair() {
     Layer color;
     color.name = QStringLiteral("CTG 색");
@@ -442,6 +467,7 @@ int Document::addCtgPair() {
     return curLayer_;
 }
 
+// 레이어를 삭제한다 (최소 1개는 남겨둔다)
 void Document::removeLayer(int i) {
     if (layers_.size() <= 1 || i < 0 || i >= layers_.size()) return;
     layers_.remove(i);
@@ -451,6 +477,7 @@ void Document::removeLayer(int i) {
     emit currentChanged();
 }
 
+// 레이어를 복제해서 바로 위에 추가한다
 int Document::duplicateLayer(int i) {
     if (i < 0 || i >= layers_.size()) return -1;
     Layer l = layers_[i];
@@ -465,6 +492,7 @@ int Document::duplicateLayer(int i) {
     return curLayer_;
 }
 
+// 레이어를 바로 아래 레이어와 합친다
 bool Document::mergeDown(int i) {
     if (i <= 0 || i >= layers_.size()) return false;
     Layer& up = layers_[i];
@@ -499,6 +527,7 @@ bool Document::mergeDown(int i) {
     return true;
 }
 
+// 보이는 레이어를 전부 하나로 합친다
 bool Document::mergeVisible() {
     int count = 0;
     for (const Layer& L : layers_) count += L.visible ? 1 : 0;
@@ -511,6 +540,7 @@ bool Document::mergeVisible() {
     return true;
 }
 
+// 레이어 순서를 위/아래로 옮긴다
 void Document::moveLayer(int i, int delta) {
     const int j = i + delta;
     if (i < 0 || j < 0 || i >= layers_.size() || j >= layers_.size()) return;
@@ -530,6 +560,7 @@ int Document::addFolder(const QString& name) {
     return folders_.size() - 1;
 }
 
+// 레이어 폴더를 삭제한다 (소속 레이어는 폴더 없음으로 풀린다)
 void Document::removeFolder(int i) {
     if (i < 0 || i >= folders_.size()) return;
     for (Layer& l : layers_) {
@@ -540,6 +571,7 @@ void Document::removeFolder(int i) {
     notifyStructure();
 }
 
+// 레이어를 특정 폴더에 소속시킨다
 void Document::setLayerFolder(int layer, int folder) {
     if (layer < 0 || layer >= layers_.size()) return;
     if (folder < -1 || folder >= folders_.size()) return;
@@ -556,6 +588,7 @@ void Document::insertFrame(int at) {
     notifyStructure();
 }
 
+// 지정 위치의 프레임을 삭제한다
 void Document::deleteFrame(int at) {
     if (frameCount_ <= 1 || at < 0 || at >= frameCount_) return;
     for (auto& l : layers_) {
@@ -570,6 +603,7 @@ void Document::deleteFrame(int at) {
     emit currentChanged();
 }
 
+// 캔버스 크기를 바꾼다 (기존 그림은 늘이기·가운데 맞춤·왼쪽 위 맞춤 중 하나로 재배치)
 void Document::resizeCanvas(QSize ns, int mode) {
     ns = QSize(std::clamp(ns.width(), 16, 8192), std::clamp(ns.height(), 16, 8192));
     if (ns == size_) return;
@@ -596,6 +630,7 @@ void Document::resizeCanvas(QSize ns, int mode) {
     emit currentChanged();
 }
 
+// 전체 프레임 수를 바꾼다
 void Document::setFrameCount(int n) {
     n = std::max(1, n);
     if (n == frameCount_) return;
@@ -614,6 +649,7 @@ void Document::addFx(int layer, const Effects::Item& item) {
     notifyStructure();
 }
 
+// 레이어에서 효과(FX)를 하나 제거한다
 void Document::removeFx(int layer, int index) {
     if (layer < 0 || layer >= layers_.size()) return;
     auto& fx = layers_[layer].fx;
@@ -654,6 +690,7 @@ static CameraKey interpKeys(const QMap<int, CameraKey>& cameraKeys_, int frame) 
     return r;
 }
 
+// 특정 프레임의 카메라 값을 보간해서 가져온다
 CameraKey Document::cameraAt(int frame) const { return interpKeys(cameraKeys_, frame); }
 
 // ---------------- 폴더 중첩 ----------------
@@ -669,6 +706,7 @@ void Document::setFolderParent(int folder, int parent) {
     notifyStructure();
 }
 
+// 폴더 중첩 깊이를 계산한다 (최상위면 0)
 int Document::folderDepth(int folder) const {
     int d = 0;
     for (int cur = folder; cur >= 0 && cur < folders_.size() && d < 64; cur = folders_[cur].parent) {
@@ -678,12 +716,14 @@ int Document::folderDepth(int folder) const {
     return d;
 }
 
+// 폴더 체인을 따라 올라가며 보임 여부를 계산한다 (부모 중 하나라도 숨겨져 있으면 숨김)
 bool Document::folderVisibleEffective(int folder) const {
     for (int cur = folder, guard = 0; cur >= 0 && cur < folders_.size() && guard < 64; cur = folders_[cur].parent, ++guard)
         if (!folders_[cur].visible) return false;
     return true;
 }
 
+// 폴더 체인을 따라 올라가며 최종 불투명도를 계산한다 (부모들의 불투명도를 곱한다)
 qreal Document::folderOpacityEffective(int folder) const {
     qreal op = 1.0;
     for (int cur = folder, guard = 0; cur >= 0 && cur < folders_.size() && guard < 64; cur = folders_[cur].parent, ++guard)
@@ -691,6 +731,7 @@ qreal Document::folderOpacityEffective(int folder) const {
     return op;
 }
 
+// 폴더 체인을 따라 올라가며 전체 경로 이름을 만든다 ("상위 / 하위" 형식)
 QString Document::folderPath(int folder) const {
     QStringList parts;
     for (int cur = folder, guard = 0; cur >= 0 && cur < folders_.size() && guard < 64; cur = folders_[cur].parent, ++guard)
@@ -726,6 +767,7 @@ FrameClip Document::copyFrames(int layer, int a, int b, bool allLayers) const {
     return c;
 }
 
+// 복사해 둔 프레임 구간을 붙여 넣는다
 bool Document::pasteFrames(int layer, int at, const FrameClip& c, bool insert) {
     if (c.isEmpty() || c.size != size_) return false;
     at = std::clamp(at, 0, frameCount_);
@@ -758,6 +800,7 @@ bool Document::pasteFrames(int layer, int at, const FrameClip& c, bool insert) {
     return true;
 }
 
+// 지정 구간의 프레임을 삭제한다 (뒤 프레임을 당기거나 그 자리를 비우거나)
 bool Document::deleteFrames(int layer, int a, int b, bool allLayers, bool shift) {
     if (frameCount_ <= 0) return false;
     a = std::clamp(a, 0, frameCount_ - 1);
@@ -788,6 +831,7 @@ bool Document::deleteFrames(int layer, int a, int b, bool allLayers, bool shift)
     return true;
 }
 
+// 지정 구간의 프레임을 다른 위치로 옮긴다
 bool Document::moveFrames(int layer, int a, int b, int dest, bool allLayers) {
     const FrameClip c = copyFrames(layer, a, b, allLayers);
     if (c.isEmpty()) return false;
@@ -824,6 +868,7 @@ void Document::addStroke(const StrokeRec& s) {
     emit recorderChanged();
 }
 
+// 특정 프레임(또는 전체)에 기록된 획을 지운다
 void Document::clearStrokes(int frame) {
     if (frame < 0) strokes_.clear();
     else
@@ -833,6 +878,7 @@ void Document::clearStrokes(int frame) {
     emit recorderChanged();
 }
 
+// 기록된 획의 개수를 센다
 int Document::strokeCount(int frame) const {
     if (frame < 0) return strokes_.size();
     int n = 0;
@@ -840,6 +886,7 @@ int Document::strokeCount(int frame) const {
     return n;
 }
 
+// 기록된 획들을 재생 비율만큼만 그려서 애니메이션 중간 과정을 보여준다
 QImage Document::renderStrokes(int frame, double fraction, bool byTime) const {
     QImage acc(size_, QImage::Format_ARGB32_Premultiplied);
     acc.fill(Qt::transparent);
@@ -890,6 +937,7 @@ QImage Document::renderStrokes(int frame, double fraction, bool byTime) const {
     return acc;
 }
 
+// 기록해 둔 획을 여러 프레임에 걸쳐 그려지는 애니메이션으로 변환한다
 int Document::strokesToFrames(int srcFrame, int startFrame, int nFrames, bool byTime) {
     if (strokeCount(srcFrame) == 0 || nFrames < 2 || startFrame < 0) return -1;
     if (startFrame + nFrames > frameCount_) setFrameCount(startFrame + nFrames);
@@ -917,6 +965,7 @@ void Document::setVectorLayer(int layer, bool on) {
     notifyStructure();
 }
 
+// 벡터 레이어의 특정 프레임에 있는 획 목록을 가져온다
 const QVector<VecStroke>* Document::vectorStrokes(int layer, int frame) const {
     if (layer < 0 || layer >= layers_.size() || !layers_[layer].vector) return nullptr;
     const int k = keyIndexAt(layer, frame);
@@ -925,11 +974,13 @@ const QVector<VecStroke>* Document::vectorStrokes(int layer, int frame) const {
     return it == layers_[layer].vstrokes.constEnd() ? nullptr : &it.value();
 }
 
+// 특정 프레임의 벡터 획 개수를 센다
 int Document::vectorStrokeCount(int layer, int frame) const {
     const QVector<VecStroke>* s = vectorStrokes(layer, frame);
     return s ? s->size() : 0;
 }
 
+// 벡터 획들을 하나의 비트맵 이미지로 그려낸다
 QImage Document::renderVectorFrame(int layer, int frame) const {
     QImage out(size_, QImage::Format_ARGB32_Premultiplied);
     out.fill(Qt::transparent);
@@ -965,6 +1016,7 @@ QImage Document::renderVectorFrame(int layer, int frame) const {
     return out;
 }
 
+// 벡터 획을 다시 래스터화해서 해당 프레임의 비트맵 이미지를 갱신한다
 void Document::rebuildVectorFrame(int layer, int frame) {
     if (layer < 0 || layer >= layers_.size() || !layers_[layer].vector) return;
     if (frame < 0 || frame >= frameCount_) return;
@@ -973,6 +1025,7 @@ void Document::rebuildVectorFrame(int layer, int frame) {
     emit changed();
 }
 
+// 특정 프레임의 벡터 획 목록을 통째로 교체한다
 void Document::setVectorStrokes(int layer, int frame, const QVector<VecStroke>& s) {
     if (layer < 0 || layer >= layers_.size() || !layers_[layer].vector) return;
     if (s.isEmpty()) layers_[layer].vstrokes.remove(frame);
@@ -981,6 +1034,7 @@ void Document::setVectorStrokes(int layer, int frame, const QVector<VecStroke>& 
     notifyStructure();
 }
 
+// 특정 프레임에 벡터 획을 하나 추가한다
 void Document::addVectorStroke(int layer, int frame, const VecStroke& s) {
     if (layer < 0 || layer >= layers_.size() || !layers_[layer].vector || s.pts.isEmpty()) return;
     // 홀드 프레임에 그리면 그 자리에 새 키가 생긴다 (앞 키의 획을 물려받는다)
@@ -993,6 +1047,7 @@ void Document::addVectorStroke(int layer, int frame, const VecStroke& s) {
     notifyStructure();
 }
 
+// 벡터 레이어를 일반 래스터 레이어로 굳힌다
 void Document::flattenVectorLayer(int layer) {
     if (layer < 0 || layer >= layers_.size() || !layers_[layer].vector) return;
     for (auto it = layers_[layer].vstrokes.cbegin(); it != layers_[layer].vstrokes.cend(); ++it)
@@ -1027,6 +1082,7 @@ static QVector<QPointF> resampleStroke(const QVector<QPointF>& pts, int n) {
     return out;
 }
 
+// 두 벡터 획 집합을 비율 t 로 보간해 중간 모양을 만든다
 QVector<VecStroke> Document::interpolateStrokes(const QVector<VecStroke>& a, const QVector<VecStroke>& b, double t) {
     t = std::clamp(t, 0.0, 1.0);
     QVector<VecStroke> out;
@@ -1078,6 +1134,7 @@ double Document::easeValue(double t, int ease) {
     }
 }
 
+// 두 키 사이를 자동으로 보간해서 중간 그림들을 채운다
 int Document::makeInbetweens(int layer, int a, int b, int mode, int ease) {
     if (layer < 0 || layer >= layers_.size()) return 0;
     if (layers_[layer].locked) return 0;
@@ -1123,11 +1180,13 @@ void Document::setPuppet(int l, bool on) {
     notifyStructure();
 }
 
+// 퍼펫 레이어의 특정 프레임 변형 값을 보간해서 가져온다
 CameraKey Document::puppetAt(int l, int frame) const {
     if (l < 0 || l >= layers_.size() || layers_[l].pkeys.isEmpty()) return CameraKey();
     return interpKeys(layers_[l].pkeys, frame);
 }
 
+// 퍼펫의 부모로 지정된 레이어의 인덱스를 찾는다
 int Document::puppetParentLayer(int l) const {
     if (l < 0 || l >= layers_.size() || layers_[l].puppetParent == 0) return -1;
     for (int i = 0; i < layers_.size(); ++i)
@@ -1135,6 +1194,7 @@ int Document::puppetParentLayer(int l) const {
     return -1;
 }
 
+// 퍼펫 체인(자식→부모)을 따라가며 최종 변형 행렬을 계산한다
 QTransform Document::puppetTransform(int l, int frame) const {
     QTransform total;
     int cur = l, guard = 0;
@@ -1157,6 +1217,7 @@ QTransform Document::puppetTransform(int l, int frame) const {
     return total;
 }
 
+// 퍼펫 레이어의 특정 프레임에 변형 키를 설정한다
 void Document::setPuppetKey(int l, int frame, const CameraKey& k) {
     if (l < 0 || l >= layers_.size() || !layers_[l].puppet) return;
     layers_[l].pkeys[frame] = k;
@@ -1164,12 +1225,14 @@ void Document::setPuppetKey(int l, int frame, const CameraKey& k) {
     notifyStructure();
 }
 
+// 퍼펫 레이어의 특정 프레임 키를 삭제한다
 void Document::removePuppetKey(int l, int frame) {
     if (l < 0 || l >= layers_.size() || !layers_[l].pkeys.remove(frame)) return;
     setModified(true);
     notifyStructure();
 }
 
+// 퍼펫 변형의 중심점(피벗)을 설정한다
 void Document::setPuppetPivot(int l, qreal x, qreal y) {
     if (l < 0 || l >= layers_.size()) return;
     layers_[l].pivotX = x;
@@ -1178,6 +1241,7 @@ void Document::setPuppetPivot(int l, qreal x, qreal y) {
     notifyStructure();
 }
 
+// 퍼펫 레이어의 부모를 설정한다 (순환 연결은 거부)
 void Document::setPuppetParent(int l, int parent) {
     if (l < 0 || l >= layers_.size()) return;
     if (parent < 0 || parent >= layers_.size() || parent == l || !layers_[parent].puppet) {
@@ -1192,6 +1256,7 @@ void Document::setPuppetParent(int l, int parent) {
     notifyStructure();
 }
 
+// 특정 프레임에 카메라 키를 설정한다
 void Document::setCameraKey(int frame, const CameraKey& k) {
     cameraKeys_[frame] = k;
     setModified(true);
@@ -1199,6 +1264,7 @@ void Document::setCameraKey(int frame, const CameraKey& k) {
     emit changed();
 }
 
+// 특정 프레임의 카메라 키를 삭제한다
 void Document::removeCameraKey(int frame) {
     if (!cameraKeys_.remove(frame)) return;
     setModified(true);
@@ -1206,6 +1272,7 @@ void Document::removeCameraKey(int frame) {
     emit changed();
 }
 
+// 카메라 키 값으로부터 화면에 적용할 변형 행렬을 만든다
 QTransform Document::cameraTransform(const CameraKey& k) const {
     const double s = std::max(0.01, double(k.scale));
     QTransform t;
@@ -1252,15 +1319,18 @@ int Document::floodFill(QImage& img, const QPoint& seed, const QColor& color, in
     return painted;
 }
 
+// 자동 채색(배치 페인트통)에 쓸 클릭 지점·색을 기록해 둔다
 void Document::recordFill(const QPoint& at, const QColor& c) {
     if (fillMarks_.size() > 256) fillMarks_.removeFirst();
     fillMarks_.push_back({at, c});
 }
 
+// 기록해 둔 자동 채색 지점을 모두 지운다
 void Document::clearFillMarks() {
     fillMarks_.clear();
 }
 
+// 기록된 채색 지점들을 여러 프레임에 한 번에 적용한다
 int Document::batchFill(int layer, int from, int to, const QVector<FillMark>& marks, int tolerance) {
     if (layer < 0 || layer >= layers_.size() || marks.isEmpty()) return 0;
     if (layers_[layer].locked) return 0;
@@ -1288,11 +1358,13 @@ int Document::batchFill(int layer, int from, int to, const QVector<FillMark>& ma
 // ---------------- 색 공간 (ICC) ----------------
 int Document::colorSpaceCount() { return 5; }
 
+// 색 공간 번호에 대응하는 표시 이름을 반환한다
 QString Document::colorSpaceName(int i) {
     static const char* n[] = {"sRGB (기본)", "Display P3", "Adobe RGB (1998)", "ProPhoto RGB", "붙이지 않음"};
     return QString::fromUtf8(n[std::clamp(i, 0, 4)]);
 }
 
+// 프로젝트의 색 공간(ICC 프로필)을 설정한다
 void Document::setColorSpace(int i) {
     i = std::clamp(i, 0, colorSpaceCount() - 1);
     if (i == colorSpace_) return;
@@ -1301,6 +1373,7 @@ void Document::setColorSpace(int i) {
     emit changed();
 }
 
+// 내보낼 이미지에 색 공간(ICC 프로필) 태그를 붙인다
 void Document::tagColorSpace(QImage& img) const {
     if (img.isNull()) return;
     QColorSpace cs;
@@ -1314,6 +1387,7 @@ void Document::tagColorSpace(QImage& img) const {
     if (cs.isValid()) img.setColorSpace(cs);
 }
 
+// 멀티플레인 카메라용으로, 카메라 움직임을 레이어별 따라가기 비율만큼만 적용한 카메라 값을 만든다
 CameraKey Document::cameraAtFollow(int frame, int followPct) const {
     CameraKey k = cameraAt(frame);
     const double f = std::clamp(followPct, 0, 400) / 100.0;
@@ -1327,12 +1401,14 @@ CameraKey Document::cameraAtFollow(int frame, int followPct) const {
     return o;
 }
 
+// 따라가기 비율이 100%가 아닌 레이어가 하나라도 있는지(멀티플레인 사용 여부) 확인한다
 bool Document::hasMultiplane() const {
     for (const Layer& L : layers_)
         if (L.visible && L.camFollow != 100) return true;
     return false;
 }
 
+// 카메라가 보고 있는 화면 영역을 캔버스 좌표계 사각형으로 계산한다
 QPolygonF Document::cameraFrame(int frame) const {
     bool ok = false;
     const QTransform inv = cameraTransform(cameraAt(frame)).inverted(&ok);
@@ -1349,6 +1425,7 @@ void Document::setLibraryCategory(int i, const QString& cat) {
     emit libraryChanged();
 }
 
+// 라이브러리 항목의 이름을 바꾼다
 void Document::setLibraryName(int i, const QString& name) {
     if (i < 0 || i >= libNames_.size() || name.trimmed().isEmpty()) return;
     libNames_[i] = name.trimmed();
@@ -1356,6 +1433,7 @@ void Document::setLibraryName(int i, const QString& name) {
     emit libraryChanged();
 }
 
+// 라이브러리에서 쓰이고 있는 분류 이름 목록을 정렬해서 반환한다
 QStringList Document::libraryCategories() const {
     QStringList out;
     for (const QString& s : libCats_)
@@ -1364,6 +1442,7 @@ QStringList Document::libraryCategories() const {
     return out;
 }
 
+// 라이브러리에 이미지를 추가한다
 int Document::addToLibrary(const QString& name, const QImage& img) {
     libNames_.push_back(name);
     libCats_.push_back(QString());
@@ -1373,6 +1452,7 @@ int Document::addToLibrary(const QString& name, const QImage& img) {
     return libNames_.size() - 1;
 }
 
+// 라이브러리에서 항목을 제거한다
 void Document::removeFromLibrary(int i) {
     if (i >= 0 && i < libCats_.size()) libCats_.remove(i);
     if (i < 0 || i >= libNames_.size()) return;
@@ -1382,6 +1462,7 @@ void Document::removeFromLibrary(int i) {
     emit libraryChanged();
 }
 
+// 소리 파일 경로를 설정한다 (기존 트랙은 모두 지우고 하나로 교체)
 void Document::setAudioPath(const QString& p) {
     audioTracks_.clear();
     if (!p.isEmpty()) {
@@ -1394,6 +1475,7 @@ void Document::setAudioPath(const QString& p) {
     emit audioChanged();
 }
 
+// 소리 트랙을 추가한다
 int Document::addAudioTrack(const QString& path, const QString& name) {
     AudioTrack t;
     t.path = path;
@@ -1404,6 +1486,7 @@ int Document::addAudioTrack(const QString& path, const QString& name) {
     return audioTracks_.size() - 1;
 }
 
+// 소리 트랙을 제거한다
 void Document::removeAudioTrack(int i) {
     if (i < 0 || i >= audioTracks_.size()) return;
     audioTracks_.removeAt(i);
@@ -1411,6 +1494,7 @@ void Document::removeAudioTrack(int i) {
     emit audioChanged();
 }
 
+// 소리 트랙을 복제한다
 int Document::duplicateAudioTrack(int i) {
     if (i < 0 || i >= audioTracks_.size()) return -1;
     AudioTrack t = audioTracks_[i];
@@ -1421,6 +1505,7 @@ int Document::duplicateAudioTrack(int i) {
     return audioTracks_.size() - 1;
 }
 
+// 소리 트랙 순서를 옮긴다
 void Document::moveAudioTrack(int i, int delta) {
     const int j = i + delta;
     if (i < 0 || j < 0 || i >= audioTracks_.size() || j >= audioTracks_.size()) return;
@@ -1429,6 +1514,7 @@ void Document::moveAudioTrack(int i, int delta) {
     emit audioChanged();
 }
 
+// 소리 트랙 정보를 통째로 갱신한다
 void Document::updateAudioTrack(int i, const AudioTrack& t) {
     if (i < 0 || i >= audioTracks_.size()) return;
     audioTracks_[i] = t;
@@ -1436,6 +1522,7 @@ void Document::updateAudioTrack(int i, const AudioTrack& t) {
     emit audioChanged();
 }
 
+// 전체 볼륨과 음소거 여부를 설정한다
 void Document::setMaster(double volume, bool muted) {
     masterVolume_ = volume;
     masterMuted_ = muted;
@@ -1448,6 +1535,7 @@ void Document::pushKeyEdit(int layer, int key, const QImage& before, const QImag
     undo_->push(new KeyEditCmd(this, layer, key, before, after, text));
 }
 
+// 현재 선택된 키 이미지에 변환 함수를 적용하고 실행 취소에 기록한다
 bool Document::transformCurrent(const std::function<QImage(const QImage&)>& fn, const QString& text) {
     const int l = curLayer_;
     const int k = keyIndexAt(l, curFrame_);
@@ -1565,6 +1653,7 @@ void layerExtLoad(Layer& l, const QVariantMap& m) {
 }
 } // namespace
 
+// 저장 시 함께 저장할 확장 데이터(북마크·색공간·소리 트랙 등)를 모은다
 QVariantMap Document::extraSave() const {
     QVariantMap m;
     QVariantList bm;
@@ -1604,6 +1693,7 @@ QVariantMap Document::extraSave() const {
     return m;
 }
 
+// 저장된 확장 데이터(extraSave 로 만든 것)를 불러와 되돌린다
 void Document::extraLoad(const QVariantMap& m) {
     {
         const QVariantMap ease = m.value("cameraEase").toMap();
@@ -1678,6 +1768,7 @@ void Document::extraLoad(const QVariantMap& m) {
     markColors_ = mc.isEmpty() ? QVector<MarkColor>{{QStringLiteral("빨강"), QColor(0xe5, 0x39, 0x35)}} : mc;
 }
 
+// 프로젝트를 파일로 저장한다
 bool Document::save(const QString& path) {
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly)) return false;
@@ -1714,6 +1805,7 @@ bool Document::save(const QString& path) {
     return true;
 }
 
+// 파일에서 프로젝트를 읽어 들인다
 bool Document::load(const QString& path) {
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) return false;
@@ -1869,12 +1961,14 @@ bool Document::load(const QString& path) {
     return true;
 }
 
+// 수정 여부 플래그를 설정한다
 void Document::setModified(bool m) {
     if (modified_ == m) return;
     modified_ = m;
     emit modifiedChanged();
 }
 
+// 지정 프레임을 렌더링한 이미지를 만든다 (배경색·카메라·렌더용 카메라 크기까지 반영)
 QImage Document::renderFrame(int frame, const QColor& bg, bool useCamera) const {
     Document* self = const_cast<Document*>(this);
     const int keep = proxyDiv_;
@@ -1912,6 +2006,7 @@ QImage Document::renderFrame(int frame, const QColor& bg, bool useCamera) const 
     return out;
 }
 
+// 지정 프레임을 PNG 파일로 내보낸다
 bool Document::exportFrame(int frame, const QString& path) const {
     Document* self = const_cast<Document*>(this);
     const int keep = proxyDiv_;
@@ -1923,6 +2018,7 @@ bool Document::exportFrame(int frame, const QString& path) const {
     return ok;
 }
 
+// 특정 프레임에 메모(노트)를 설정한다
 void Document::setNote(int frame, const QString& t) {
     if (t.isEmpty()) notes_.remove(frame);
     else notes_[frame] = t;
@@ -1930,17 +2026,20 @@ void Document::setNote(int frame, const QString& t) {
     emit libraryChanged();
 }
 
+// 내용이 바뀌었음을 알린다 (수정됨 표시 + changed 신호)
 void Document::notifyChanged() {
     setModified(true);
     emit changed();
 }
 
+// 구조가 바뀌었음을 알린다 (수정됨 표시 + structureChanged·changed 신호)
 void Document::notifyStructure() {
     setModified(true);
     emit structureChanged();
     emit changed();
 }
 
+// 구간 안의 키 이미지 순서를 거꾸로 뒤집는다 (노출 길이는 유지)
 void Document::reverseKeys(int layer, int a, int b) {
     if (layer < 0 || layer >= layers_.size()) return;
     a = std::clamp(a, 0, frameCount_ - 1);
@@ -1969,6 +2068,7 @@ void Document::reverseKeys(int layer, int a, int b) {
     setModified(true);
 }
 
+// 구간 안의 키 이미지들을 일정한 간격으로 고르게 재배치한다
 void Document::setUniformExposure(int layer, int n) {
     if (layer < 0 || layer >= layers_.size() || n < 1) return;
     auto& fr = layers_[layer].frames;
@@ -2057,6 +2157,7 @@ bool Document::packTo(const QString& onyPath, QString* report) {
     return ok;
 }
 
+// 현재 경로는 바꾸지 않은 채 다른 경로로 사본을 저장한다
 bool Document::saveCopy(const QString& path) {
     const QString keepPath = path_;
     const bool keepMod = modified();
@@ -2066,6 +2167,7 @@ bool Document::saveCopy(const QString& path) {
     return ok;
 }
 
+// 구간을 지정한 횟수만큼 반복한다 (핑퐁 반복 가능)
 int Document::repeatKeys(int layer, int a, int b, int times, bool pingpong) {
     if (layer < 0 || layer >= layers_.size() || times < 1) return 0;
     a = std::clamp(a, 0, frameCount_ - 1);
@@ -2104,6 +2206,7 @@ int Document::repeatKeys(int layer, int a, int b, int times, bool pingpong) {
     return len * times;
 }
 
+// 전체 프레임 속도를 바꾸면서 모든 프레임 위치·길이를 비율에 맞게 늘이거나 줄인다
 void Document::stretchToFps(int newFps) {
     newFps = std::max(1, newFps);
     if (newFps == fps_) return;

@@ -46,13 +46,17 @@ static const char* kDesc[] = {
     "레이어와 아래 그림 중 더 밝은 값을 고릅니다.",
 };
 
+// 블렌드 모드 번호에 대응하는 한국어 이름을 반환한다
 QString name(int m) { return QString::fromUtf8(kKo[std::clamp(m, 0, Count - 1)]); }
+// 블렌드 모드 번호에 대응하는 영문 이름을 반환한다 (파일 내보내기 등에 사용)
 QString englishName(int m) { return QString::fromLatin1(kEn[std::clamp(m, 0, Count - 1)]); }
+// 블렌드 모드 번호에 대응하는 한 줄 설명을 반환한다
 QString description(int m) { return QString::fromUtf8(kDesc[std::clamp(m, 0, Count - 1)]); }
 
 namespace {
 struct V3 { float r, g, b; };
 
+// 색의 밝기(휘도)를 계산한다 — 색조/채도 계열 블렌드 모드에 쓰인다
 inline float lum(V3 c) { return 0.3f * c.r + 0.59f * c.g + 0.11f * c.b; }
 inline V3 clipColor(V3 c) {
     const float l = lum(c);
@@ -71,6 +75,7 @@ inline V3 setLum(V3 c, float l) {
     const float d = l - lum(c);
     return clipColor({c.r + d, c.g + d, c.b + d});
 }
+// 색의 채도(가장 밝은 채널과 가장 어두운 채널의 차이)를 계산한다
 inline float sat(V3 c) { return std::max({c.r, c.g, c.b}) - std::min({c.r, c.g, c.b}); }
 inline V3 setSat(V3 c, float s) {
     float* v[3] = {&c.r, &c.g, &c.b};

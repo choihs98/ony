@@ -13,7 +13,7 @@ if(WIN32)
     enable_language(RC)
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia Network)
 find_package(Qt6 OPTIONAL_COMPONENTS Test PrintSupport)
 
 add_library(onycore STATIC
@@ -31,9 +31,10 @@ add_library(onycore STATIC
     src/Psd.h src/Psd.cpp
     src/Plugins.h src/Plugins.cpp
     src/Collab.h src/Collab.cpp
+    src/License.h src/License.cpp
 )
 target_include_directories(onycore PUBLIC src)
-target_link_libraries(onycore PUBLIC Qt6::Widgets)
+target_link_libraries(onycore PUBLIC Qt6::Widgets Qt6::Network)
 if(TARGET Qt6::PrintSupport)
     target_link_libraries(onycore PUBLIC Qt6::PrintSupport)
     target_compile_definitions(onycore PUBLIC ONY_HAS_PRINT)

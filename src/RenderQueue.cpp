@@ -20,6 +20,7 @@
 #include <algorithm>
 #include "Document.h"
 
+// 작업 상태를 화면에 보여줄 한글 문구로 바꾼다
 QString RenderJob::stateText() const {
     switch (state) {
     case 1: return QStringLiteral("하는 중");
@@ -30,6 +31,7 @@ QString RenderJob::stateText() const {
     }
 }
 
+// 창을 닫아도 남아있는 작업 목록(프로그램 전체에서 공유)을 반환한다
 QVector<RenderJob>& RenderQueueDialog::jobs() {
     static QVector<RenderJob> g;
     return g;
@@ -49,6 +51,7 @@ QString formatLabel(const QString& f) {
 bool isSequence(const QString& f) { return f == "png" || f == "jpg" || f == "tiff"; }
 }   // namespace
 
+// 배치 렌더 대화상자를 만들고 화면을 구성한다
 RenderQueueDialog::RenderQueueDialog(Document* doc, QWidget* parent) : QDialog(parent), doc_(doc) {
     setWindowTitle(QStringLiteral("배치 렌더 (여러 개 걸어 두고 한 번에)"));
     setMinimumSize(760, 420);
@@ -119,11 +122,13 @@ RenderQueueDialog::RenderQueueDialog(Document* doc, QWidget* parent) : QDialog(p
     rebuild();
 }
 
+// 표에서 지금 선택된 행 번호를 가져온다 (없으면 -1)
 int RenderQueueDialog::selectedRow() const {
     const auto sel = table_->selectionModel()->selectedRows();
     return sel.isEmpty() ? -1 : sel.first().row();
 }
 
+// 작업 목록을 다시 읽어 표를 갱신한다
 void RenderQueueDialog::rebuild() {
     const auto& js = jobs();
     const int keep = selectedRow();
@@ -151,6 +156,7 @@ void RenderQueueDialog::rebuild() {
                                       : QStringLiteral("작업 %1개").arg(js.size()));
 }
 
+// 새 렌더 작업을 입력받는 작은 대화상자를 띄우고, 확인하면 목록에 추가한다
 void RenderQueueDialog::addJob() {
     QDialog dlg(this);
     dlg.setWindowTitle(QStringLiteral("작업 추가"));
@@ -233,6 +239,7 @@ void RenderQueueDialog::addJob() {
     rebuild();
 }
 
+// 선택된 작업을 목록에서 지운다
 void RenderQueueDialog::removeSel() {
     const int r = selectedRow();
     if (r < 0 || r >= jobs().size() || running_) return;
@@ -240,6 +247,7 @@ void RenderQueueDialog::removeSel() {
     rebuild();
 }
 
+// 선택된 작업을 목록에서 위/아래로 옮긴다
 void RenderQueueDialog::moveSel(int delta) {
     const int r = selectedRow();
     auto& js = jobs();
@@ -250,6 +258,7 @@ void RenderQueueDialog::moveSel(int delta) {
     table_->selectRow(n);
 }
 
+// 목록에 걸린 작업을 위에서부터 차례로 실행한다 (취소되면 지금 작업만 끝내고 멈춘다)
 void RenderQueueDialog::runAll() {
     if (running_) return;
     auto& js = jobs();

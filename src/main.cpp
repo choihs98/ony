@@ -11,6 +11,7 @@
 #include <QSplashScreen>
 #include <QTimer>
 #include <QVariantAnimation>
+#include "License.h"
 #include "MainWindow.h"
 #include "Privacy.h"
 #include "Style.h"
@@ -70,6 +71,9 @@ int main(int argc, char** argv) {
 #ifdef ONY_HAS_LOGO
     app.setWindowIcon(QIcon(":/ony.png"));
 #endif
+    // 라이선스 확인 (오프스크린으로 띄우는 자동 테스트/스모크 실행은 막지 않는다)
+    if (QApplication::platformName() != "offscreen" && !License::ensureLicensed(nullptr))
+        return 0;
     const bool useSplash = QSettings("Ony", "Ony").value("start/splash", true).toBool() && QApplication::platformName() != "offscreen";
     QElapsedTimer clock;
     clock.start();

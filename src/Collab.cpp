@@ -30,6 +30,7 @@ QString machineName() {
 }
 
 int staleMinutes() { return QSettings("Ony", "Ony").value("collab/staleMinutes", 120).toInt(); }
+// 잠금을 "오래됨"으로 볼 기준 시간(분)을 저장한다
 void setStaleMinutes(int m) { QSettings("Ony", "Ony").setValue("collab/staleMinutes", std::max(5, m)); }
 
 QString lockPath(const QString& projectPath) { return projectPath + ".lock"; }
