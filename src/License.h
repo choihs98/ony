@@ -37,7 +37,7 @@ namespace License {
 inline constexpr const char* kSharedSecretHex = "b0989dc6bc0cd01adcfcb08652df2077ce9dd2460ded10902eaf17b8c323b0f3";
 
 // 라이선스 서버(Worker) 기본 주소. 배포한 뒤 실제 주소로 바꾸거나, setServerUrl() 로 덮어쓸 수 있다.
-inline constexpr const char* kDefaultServerUrl = "https://ony-license.choihs2103.workers.dev";
+inline constexpr const char* kDefaultServerUrl = "https://license.jaesong.kr";
 
 // 이 컴퓨터를 나타내는 고유 ID. 개인정보(이름·IP 등)는 들어가지 않고, 해시된 값만 쓴다.
 QString machineId();
