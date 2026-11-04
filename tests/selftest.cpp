@@ -199,12 +199,12 @@ static void testV2() {
         src.close();
         CHECK(raw.left(4) == QByteArray("ONY1"));
         raw.replace(0, 4, "TVPX");
-        QFile old(tmp.filePath("old.tvpx"));
+        QFile old(tmp.filePath("old.onyx"));
         CHECK(old.open(QIODevice::WriteOnly));
         old.write(raw);
         old.close();
         Document g;
-        CHECK(g.load(tmp.filePath("old.tvpx")) && g.layerCount() == d.layerCount());
+        CHECK(g.load(tmp.filePath("old.onyx")) && g.layerCount() == d.layerCount());
     }
 }
 

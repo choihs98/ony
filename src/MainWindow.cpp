@@ -3822,10 +3822,14 @@ void MainWindow::newProjectDialog() {
     canvas_->zoomFit();
 }
 
-// 프로젝트 파일 열기 대화상자
+// 프로젝트 파일 열기 대화상자.
+// 확장자 안내: 지금 저장은 항상 .ony 로만 한다. .onyx 는 과거 버전의 레거시 확장자명이고,
+// .tvpx 는 그보다도 더 예전(이름 바뀌기 전)에 쓰이던 확장자라 둘 다 "읽기용" 하위 호환으로만 남겨 둔 것 —
+// 둘 다 Document::load() 가 파일 내용의 매직 값(kMagic/kLegacyMagic)으로 판단하므로, 확장자 자체는
+// 이 열기 대화상자에서 어떤 파일을 보여줄지 고르는 용도일 뿐 실제 호환 여부를 좌우하지 않는다.
 void MainWindow::openProject() {
     if (!maybeSave()) return;
-    const QString path = QFileDialog::getOpenFileName(this, "프로젝트 열기", QString(), "ONY 프로젝트 (*.ony *.tvpx)");
+    const QString path = QFileDialog::getOpenFileName(this, "프로젝트 열기", QString(), "ONY 프로젝트 (*.ony *.onyx *.tvpx)");
     if (path.isEmpty()) return;
     openPath(path);
 }
@@ -3913,7 +3917,7 @@ bool MainWindow::writeProject(const QString& path) {
         addRecent(path);
         QString base = path;
         if (base.endsWith(".ony", Qt::CaseInsensitive)) base.chop(4);
-        else if (base.endsWith(".tvpx", Qt::CaseInsensitive)) base.chop(5);
+        else if (base.endsWith(".onyx", Qt::CaseInsensitive) || base.endsWith(".tvpx", Qt::CaseInsensitive)) base.chop(5);
         // 다른 클립은 <이름>.clipN.ony, 클립 이름은 <이름>.clips 에 기록
         for (int i = 1; i < clipNames_.size(); ++i) {
             const QString dst = QString("%1.clip%2.ony").arg(base).arg(i + 1);
@@ -3945,7 +3949,7 @@ void MainWindow::loadClipSiblings(const QString& path) {
     resetClips();
     QString base = path;
     if (base.endsWith(".ony", Qt::CaseInsensitive)) base.chop(4);
-        else if (base.endsWith(".tvpx", Qt::CaseInsensitive)) base.chop(5);
+        else if (base.endsWith(".onyx", Qt::CaseInsensitive) || base.endsWith(".tvpx", Qt::CaseInsensitive)) base.chop(5);
     QStringList names;
     QFile nf(base + ".clips");
     if (nf.open(QIODevice::ReadOnly | QIODevice::Text)) names = QString::fromUtf8(nf.readAll()).split('\n', Qt::SkipEmptyParts);
@@ -4886,7 +4890,6 @@ void MainWindow::licenseDialog() {
         QString s = st.licenseKey.isEmpty() ? QStringLiteral("등록된 라이선스가 없습니다.")
                                              : QString("키: %1\n상태: %2").arg(st.licenseKey, st.licensed ? QStringLiteral("정상 사용 중") : QStringLiteral("사용 불가"));
         s += "\n" + st.message;
-        s += "\n연락처 동의: " + (st.contactConsentGiven ? QString("예 (%1)").arg(st.contactEmail) : QStringLiteral("아니오"));
         status->setText(s);
     };
     refresh();
@@ -4894,8 +4897,7 @@ void MainWindow::licenseDialog() {
     auto* revalBtn = new QPushButton("지금 다시 확인");
     auto* changeBtn = new QPushButton("다른 키로 바꾸기...");
     auto* dropBtn = new QPushButton("이 기기에서 반납");
-    auto* withdrawBtn = new QPushButton("연락처 정보 삭제");
-    for (QPushButton* b : {revalBtn, changeBtn, dropBtn, withdrawBtn}) row->addWidget(b);
+    for (QPushButton* b : {revalBtn, changeBtn, dropBtn}) row->addWidget(b);
     row->addStretch();
     lay->addLayout(row);
     auto* bb = new QDialogButtonBox(QDialogButtonBox::Close);
@@ -4923,11 +4925,6 @@ void MainWindow::licenseDialog() {
         License::clearLicense();
         if (License::ensureLicensed(this)) refresh();
         else statusBar()->showMessage(QStringLiteral("라이선스를 등록하지 않았습니다."), 4000);
-    });
-    connect(withdrawBtn, &QPushButton::clicked, &dlg, [client] { client->withdrawContact(); });
-    connect(client, &License::Client::contactWithdrawn, &dlg, [this, refresh](bool, const QString& msg) {
-        refresh();
-        if (!msg.isEmpty()) statusBar()->showMessage(msg, 5000);
     });
     dlg.exec();
 }

@@ -1,6 +1,5 @@
 #include "License.h"
 
-#include <QCheckBox>
 #include <QCryptographicHash>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -266,34 +265,21 @@ bool ensureLicensed(QWidget* parent) {
     }
 
     QDialog dlg(parent);
-    dlg.setWindowTitle(QStringLiteral("ONY 라이선스"));
+    dlg.setWindowTitle(QStringLiteral("ONY 정품 인증"));
     dlg.setMinimumWidth(420);
     auto* lay = new QVBoxLayout(&dlg);
     auto* info = new QLabel(st.knownBad
         ? QStringLiteral("이 라이선스는 서버에서 취소/만료 처리되었습니다. 다른 키를 입력해 주세요.")
-        : QStringLiteral("ONY 를 쓰려면 라이선스 키를 입력해 주세요.\n(인터넷에 연결되어 있어야 합니다.)"));
+        : QStringLiteral("ONY 정식 버전 사용을 위해 라이선스 키를 등록해 주세요."));
     info->setWordWrap(true);
     lay->addWidget(info);
+    // 키 입력칸만 둔다 — 예전엔 연락처 동의 체크박스/이메일 입력도 여기 있었지만, 활성화 자체에는
+    // 필요 없는 정보라 등록 화면에서는 완전히 뺐다 (activate() 는 여전히 선택 인자로 받을 수 있지만
+    // 이 화면에서는 항상 빈 값으로 호출한다). 판매 시점 이메일은 관리자가 /admin/create 때 별도로 기록한다.
     auto* form = new QFormLayout;
     auto* keyEdit = new QLineEdit(st.licenseKey);
-    keyEdit->setPlaceholderText("ONY-XXXX-XXXX-XXXX-XXXX");
     form->addRow("라이선스 키", keyEdit);
     lay->addLayout(form);
-
-    auto* consentBox = new QCheckBox(QStringLiteral("연락처 수집에 동의합니다 (선택)"));
-    auto* emailEdit = new QLineEdit(st.contactEmail);
-    emailEdit->setPlaceholderText("you@example.com");
-    emailEdit->setEnabled(false);
-    auto* consentNote = new QLabel(QStringLiteral(
-        "이 라이선스가 무단으로 여러 곳에서 쓰이는 것으로 의심될 때 연락드리기 위한 목적으로만 이메일을 씁니다.\n"
-        "동의하지 않아도 ONY 사용에는 영향이 없고, 나중에 도움말 → 라이선스 정보에서 언제든 삭제를 요청할 수 있습니다."));
-    consentNote->setWordWrap(true);
-    consentNote->setStyleSheet("color:#a0a0a0; font-size:11px;");
-    lay->addWidget(consentBox);
-    lay->addWidget(emailEdit);
-    lay->addWidget(consentNote);
-    QObject::connect(consentBox, &QCheckBox::toggled, emailEdit, &QLineEdit::setEnabled);
-    if (st.contactConsentGiven) consentBox->setChecked(true);
 
     auto* status = new QLabel;
     status->setWordWrap(true);
@@ -314,7 +300,7 @@ bool ensureLicensed(QWidget* parent) {
         bb->button(QDialogButtonBox::Ok)->setEnabled(false);
         status->setStyleSheet("color:#a0a0a0;");
         status->setText("서버에 확인하는 중...");
-        client->activate(key, emailEdit->text(), consentBox->isChecked());
+        client->activate(key);
     });
     QObject::connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     QObject::connect(client, &Client::activated, &dlg, [&](bool ok, const QString& msg) {
