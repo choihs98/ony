@@ -6,6 +6,7 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QIcon>
+#include <QNetworkProxyFactory>
 #include <QPainter>
 #include <QSettings>
 #include <QSplashScreen>
@@ -68,6 +69,10 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     app.setApplicationName("ONY");
     app.setOrganizationName("Ony"); // 설정 저장 위치 (기존 설정 유지를 위해 이름 그대로)
+    // Qt 네트워크 모듈은 기본적으로 OS에 설정된 프록시를 자동으로 쓰지 않는다 — 회사 네트워크처럼
+    // 브라우저만 프록시를 타고 인터넷에 나가는 환경에서는, 이 줄이 없으면 라이선스 서버 요청이
+    // (브라우저로 같은 주소를 열면 되는데도) 계속 실패한다. 꼭 라이선스 확인보다 먼저 호출해야 한다.
+    QNetworkProxyFactory::setUseSystemConfiguration(true);
 #ifdef ONY_HAS_LOGO
     app.setWindowIcon(QIcon(":/ony.png"));
 #endif
