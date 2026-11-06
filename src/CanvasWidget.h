@@ -22,7 +22,7 @@ class CanvasWidget : public QWidget {
     Q_OBJECT
 public:
     enum class Tool { Pen, Pencil, Eraser, Line, Rect, Circle, Spline, Bucket, Select, Pan, Warp,
-                      Pick, Lasso, Polygon, Wand, Gradient, Text };
+                      Pick, Lasso, Polygon, Wand, Gradient, Text, Zoom };
 
     explicit CanvasWidget(Document* doc, QWidget* parent = nullptr);
 
@@ -102,6 +102,7 @@ public:
     void centerOnImagePoint(const QPointF& ip);
 
     void zoomBy(qreal factor);
+    void zoomAt(const QPointF& screenPos, qreal factor); // screenPos 를 고정점으로 확대/축소 (돋보기 툴)
     void zoomFit();
     void zoomActual();
     void clearCurrent();

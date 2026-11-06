@@ -150,6 +150,9 @@ private:
     QSpinBox* sizeV_;
     QSpinBox* opacityV_;
     QSpinBox* hardnessV_;
+    // 프리셋(도구)별로 마지막에 맞춰둔 크기/불투명도/경도/필압을 기억해 둔다.
+    // 이게 없으면 도구를 바꿀 때마다(펜->지우개->펜) 매번 프리셋 기본값으로 초기화돼 버린다.
+    QVector<BrushParams> savedParams_;
     void emitParams();
     void syncIcons(int row);
 };

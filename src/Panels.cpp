@@ -71,6 +71,7 @@ MainPanel::MainPanel(QWidget* parent) : QWidget(parent) {
         {"wand", "마술봉 선택 (비슷한 색 영역). Shift=더하기, Alt=빼기"},
         {"gradient", "그라디언트 (A 색 → B 색, 끌어서 방향 지정)"},
         {"text", "글자 넣기 (도구 패널 옵션에서 내용 입력)"},
+        {"zoom", "돋보기: 왼쪽 클릭 = 확대, 오른쪽 클릭/Alt+클릭 = 축소 (클릭한 지점 기준)"},
     };
     auto* grid = new QGridLayout;
     grid->setSpacing(2);
@@ -354,12 +355,21 @@ void ColorPanel::rebuildSwatches() {
         auto* b = new QToolButton;
         b->setFixedSize(16, 16);
         b->setStyleSheet(QString("background:%1;border:1px solid #333;").arg(c.name()));
-        b->setToolTip(QString("%1\n왼쪽 클릭: 이 색 쓰기 / 오른쪽 클릭: 지금 A 색으로 바꾸기").arg(c.name().toUpper()));
+        b->setToolTip(QString("%1\n왼쪽 클릭: 이 색 쓰기 / 오른쪽 클릭: 바꾸기·지우기").arg(c.name().toUpper()));
         b->setContextMenuPolicy(Qt::CustomContextMenu);
         connect(b, &QToolButton::clicked, this, [this, c] { setColorA(c); });
-        connect(b, &QToolButton::customContextMenuRequested, this, [this, i] {
-            if (i >= 0 && i < swatches_.size()) {
+        // 오른쪽 클릭 메뉴: 지금 A 색으로 덮어쓰거나, 이 견본만 팔레트에서 지운다
+        connect(b, &QToolButton::customContextMenuRequested, this, [this, i, b](const QPoint& pos) {
+            if (i < 0 || i >= swatches_.size()) return;
+            QMenu m(this);
+            QAction* replace = m.addAction(QStringLiteral("지금 A 색으로 바꾸기"));
+            QAction* del = m.addAction(QStringLiteral("이 색 지우기"));
+            QAction* chosen = m.exec(b->mapToGlobal(pos));
+            if (chosen == replace) {
                 swatches_[i] = a_;
+                rebuildSwatches();
+            } else if (chosen == del) {
+                swatches_.removeAt(i);
                 rebuildSwatches();
             }
         });
@@ -411,6 +421,17 @@ ToolPanel::ToolPanel(QWidget* parent) : QWidget(parent) {
     for (int i = 0; i < brushPresetCount(); ++i) list_->addItem(QString::fromUtf8(brushPreset(i).name));
     list_->setCurrentRow(0);
     list_->hide(); // 모델로만 사용
+
+    // 프리셋별 "마지막으로 맞춰둔 값"을 일단 프리셋 기본값으로 채워 둔다.
+    // (처음 그 프리셋을 쓸 때는 기본값이고, 한 번이라도 손보면 emitParams() 가 덮어 써서 기억한다)
+    savedParams_.resize(brushPresetCount());
+    for (int i = 0; i < brushPresetCount(); ++i) {
+        const BrushPreset& pr0 = brushPreset(i);
+        BrushParams sp;
+        sp.size = pr0.size; sp.opacity = pr0.opacity; sp.hardness = pr0.hardness; sp.pressure = pr0.pressure;
+        sp.preset = i;
+        savedParams_[i] = sp;
+    }
 
     // 브러시 아이콘 격자 (이름은 툴팁)
     auto* grid = new QGridLayout;
@@ -612,19 +633,21 @@ ToolPanel::ToolPanel(QWidget* parent) : QWidget(parent) {
     connect(customRow_, &QComboBox::currentIndexChanged, this, [this](int) { emitParams(); });
     connect(list_, &QListWidget::currentRowChanged, this, [this](int row) {
         if (row < 0) return;
-        // 프리셋의 기본 크기/불투명도/경도/필압을 적용한다
-        const BrushPreset& pr = brushPreset(row);
+        // 프리셋 기본값이 아니라, 이 프리셋을 마지막으로 썼을 때 사용자가 맞춰둔 값을 적용한다.
+        // (예전에는 매번 프리셋 기본값으로 되돌아가서, 펜 굵기를 조절해도 지우개 쓰고 다시 펜으로
+        //  오면 조절한 게 날아간 것처럼 보였다.)
+        const BrushParams& sp = savedParams_[row];
         {
             QSignalBlocker b1(opacity_), b2(hardness_), b3(size_), b4(pressure_), b5(sizeV_), b6(opacityV_), b7(hardnessV_);
-            size_->setValue(pr.size);
-            sizeV_->setValue(pr.size);
-            opacity_->setValue(pr.opacity);
-            opacityV_->setValue(pr.opacity);
-            hardness_->setValue(pr.hardness);
-            hardnessV_->setValue(pr.hardness);
-            pressure_->setChecked(pr.pressure);
+            size_->setValue(sp.size);
+            sizeV_->setValue(sp.size);
+            opacity_->setValue(sp.opacity);
+            opacityV_->setValue(sp.opacity);
+            hardness_->setValue(sp.hardness);
+            hardnessV_->setValue(sp.hardness);
+            pressure_->setChecked(sp.pressure);
         }
-        prBox_->setEnabled(pr.pressure);   // 신호를 막아 둔 사이에도 같이 따라가게 한다
+        prBox_->setEnabled(sp.pressure);   // 신호를 막아 둔 사이에도 같이 따라가게 한다
         syncIcons(row);
         emitParams();
         emit brushSelected(row);
@@ -720,6 +743,10 @@ void ToolPanel::selectPreset(int row) {
 // 지금 값으로 신호를 보내고, 필압 설정은 다음에 켤 때도 쓰도록 저장해 둔다
 void ToolPanel::emitParams() {
     const BrushParams p = params();
+    // 지금 선택된 프리셋(도구)에 대해 방금 바뀐 값을 기억해 둔다 — 다른 프리셋을 쓰다
+    // 다시 돌아와도 이 값으로 복원된다 (위 currentRowChanged 참고)
+    const int curRow = list_->currentRow();
+    if (curRow >= 0 && curRow < savedParams_.size()) savedParams_[curRow] = p;
     if (prPreview_) prPreview_->setParams(p);
     if (prSize_) {   // 필압 설정은 다음에 켤 때도 그대로 쓰도록 적어 둔다
         QSettings st("Ony", "Ony");

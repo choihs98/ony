@@ -712,6 +712,7 @@ void MainWindow::buildDocks() {
         case 13: canvas_->setTool(T::Wand); break;
         case 14: canvas_->setTool(T::Gradient); break;
         case 15: canvas_->setTool(T::Text); break;
+        case 16: canvas_->setTool(T::Zoom); break;
         default: break;
         }
     });
@@ -3357,6 +3358,8 @@ void MainWindow::buildMenus() {
     QAction* compactAct = act(view, "레이어 접기 (한 줄로 보기)", [] {}, QKeySequence("Ctrl+Shift+K"));
     compactAct->setCheckable(true);
     connect(compactAct, &QAction::toggled, this, [this](bool on) { timeline_->setCompact(on); });
+    // 다른 그림 툴들처럼, Tab 한 번으로 독 패널을 전부 접고 한 번 더 누르면 복원한다.
+    act(view, "모든 패널 접기/펼치기", [this] { toggleAllPanels(); }, QKeySequence(Qt::Key_Tab));
     view->addSeparator();
     QAction* lt = act(view, "라이트 테이블", [] {}, QKeySequence("Ctrl+L"));
     lightAct_ = lt;
@@ -3584,6 +3587,25 @@ void MainWindow::addDockToggle(QToolBar* tb, QDockWidget* dock, const QString& i
     connect(dock, &QDockWidget::visibilityChanged, a, [a](bool on) {
         if (a->isChecked() != on) a->setChecked(on);
     });
+}
+
+// Tab: 지금 떠 있는 독 패널을 전부 접는다. 한 번 더 누르면 "방금 접었던 그 패널들"만 다시 켠다
+// (중간에 사용자가 따로 숨겨뒀던 패널까지 같이 켜버리지 않도록, 접기 직전에 보이던 것만 기억해 둔다).
+void MainWindow::toggleAllPanels() {
+    if (!panelsHiddenByTab_) {
+        tabHiddenDocks_.clear();
+        for (QDockWidget* d : docks_) {
+            if (d->isVisible()) {
+                tabHiddenDocks_.push_back(d);
+                d->setVisible(false);
+            }
+        }
+        panelsHiddenByTab_ = true;
+    } else {
+        for (QDockWidget* d : tabHiddenDocks_) d->setVisible(true);
+        tabHiddenDocks_.clear();
+        panelsHiddenByTab_ = false;
+    }
 }
 
 // 현재 작업 공간 룸의 이름을 바꾼다

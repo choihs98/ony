@@ -70,7 +70,7 @@ void CanvasWidget::setTool(Tool t) {
         splinePts_.clear();
     }
     tool_ = t;
-    setCursor(t == Tool::Pan ? Qt::OpenHandCursor : Qt::CrossCursor);
+    setCursor(t == Tool::Pan ? Qt::OpenHandCursor : (t == Tool::Zoom ? Qt::PointingHandCursor : Qt::CrossCursor));
     update();
 }
 
@@ -126,9 +126,8 @@ QPointF CanvasWidget::toImage(const QPointF& p) const {
     return (q - imageTopLeft()) / zoom_;
 }
 
-// 화면 중심을 기준으로 확대/축소한다
-void CanvasWidget::zoomBy(qreal factor) {
-    const QPointF wp(width() / 2.0, height() / 2.0);
+// 화면의 한 점(wp)이 확대/축소 후에도 그대로 그 자리에 있도록 확대/축소한다
+void CanvasWidget::zoomAt(const QPointF& wp, qreal factor) {
     const QPointF ip = toImage(wp);
     zoom_ = std::clamp(zoom_ * factor, 0.05, 32.0);
     const QSize s = doc_->size();
@@ -136,6 +135,11 @@ void CanvasWidget::zoomBy(qreal factor) {
     pan_ = (wp - ip * zoom_) - center;
     emit zoomChanged(zoom_);
     update();
+}
+
+// 화면 중심을 기준으로 확대/축소한다 (Ctrl+= / Ctrl+- 등 단축키용)
+void CanvasWidget::zoomBy(qreal factor) {
+    zoomAt(QPointF(width() / 2.0, height() / 2.0), factor);
 }
 
 // 창 크기에 맞춰 전체 그림이 보이도록 확대/축소한다
@@ -734,6 +738,13 @@ void CanvasWidget::mousePressEvent(QMouseEvent* e) {
         setCursor(Qt::ClosedHandCursor);
         return;
     }
+    // 돋보기(확대/축소) 도구: 왼쪽 클릭=확대, 오른쪽 클릭/Alt+클릭=축소. 클릭한 지점이 고정점이 된다.
+    if (tool_ == Tool::Zoom) {
+        const bool out = (e->button() == Qt::RightButton) || (e->modifiers() & Qt::AltModifier);
+        zoomAt(e->position(), out ? (1.0 / 1.35) : 1.35);
+        return;
+    }
+
     const QPointF ip = toImage(e->position());
 
     // 워프: 오른쪽 클릭으로 핀 삭제

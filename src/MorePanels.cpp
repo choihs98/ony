@@ -1,6 +1,7 @@
 #include <algorithm>
 #include "MorePanels.h"
 #include <QHash>
+#include <QSet>
 #include <QTimer>
 #include <QSettings>
 #include <QMessageBox>
@@ -651,15 +652,22 @@ BrushPanel::BrushPanel(QWidget* parent) : QWidget(parent) {
         {"컷", {25, 26}},
     };
     buttons_.fill(nullptr, brushPresetCount());
-    for (const Group& g : groups) {
-        auto* hdr = new QLabel(QString("  ◉  ") + QString::fromUtf8(g.name));
+    // 이 함수가 그룹(분류)별로 버튼을 만드는데, groups 위 목록은 지금 있는 프리셋 번호를
+    // 손으로 적어둔 것이다. 나중에 Brush.cpp 의 kPresets[] 에 새 프리셋이 추가돼도 여기까지
+    // 손대지 않으면, 그 새 프리셋 번호가 어느 그룹에도 안 적혀 있어 버튼 자체가 안 만들어지고
+    // 패널에서 "사라진" 것처럼 보이는 문제가 있었다. 그래서 끝에 "그 외" 그룹을 자동으로 붙여,
+    // 위 목록에 없는 번호라도 전부 빠짐없이 버튼으로 나오게 한다 (분류만 안 될 뿐 숨겨지진 않는다).
+    QSet<int> covered;
+    auto addGroup = [&](const QString& name, const QList<int>& items) {
+        auto* hdr = new QLabel(QString("  ◉  ") + name);
         hdr->setStyleSheet("background:#3f3f3f;color:#b0b0b0;padding:2px 0;");
         lay->addWidget(hdr);
         auto* grid = new QGridLayout;
         grid->setSpacing(2);
         QList<QToolButton*> gb;
         int k = 0;
-        for (int i : g.items) {
+        for (int i : items) {
+            if (i < 0 || i >= brushPresetCount() || buttons_[i]) continue; // 범위 밖/중복 방지
             const BrushPreset& pr = brushPreset(i);
             BrushParams p;
             p.size = pr.size;
@@ -680,11 +688,17 @@ BrushPanel::BrushPanel(QWidget* parent) : QWidget(parent) {
             grid->addWidget(b, k / 3, k % 3);
             gb.push_back(b);
             buttons_[i] = b;
+            covered.insert(i);
             ++k;
         }
         lay->addLayout(grid);
         grids_.push_back({grid, gb});
-    }
+    };
+    for (const Group& g : groups) addGroup(QString::fromUtf8(g.name), g.items);
+    QList<int> rest;
+    for (int i = 0; i < brushPresetCount(); ++i)
+        if (!covered.contains(i)) rest.push_back(i);
+    if (!rest.isEmpty()) addGroup(QStringLiteral("그 외"), rest);
     lay->addStretch();
     if (buttons_[0]) buttons_[0]->setChecked(true);
 }

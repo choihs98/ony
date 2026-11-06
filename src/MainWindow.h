@@ -105,6 +105,7 @@ private:
     void saveRooms();
     void loadRooms();
     void addDockToggle(class QToolBar* tb, QDockWidget* dock, const QString& iconName, const QString& tip);
+    void toggleAllPanels(); // Tab: 지금 보이는 패널들을 한 번에 접고, 다시 누르면 그 패널들만 복원
     void publishDialog();
     void printDialog();
     void renderCameraDialog();
@@ -256,6 +257,8 @@ private:
     QAction* lightAct_ = nullptr;
     QAction* timelineToggle_ = nullptr;
     QList<QDockWidget*> docks_;
+    QList<QDockWidget*> tabHiddenDocks_; // Tab 으로 패널을 접었을 때, 원래 보이고 있던 패널만 기억해 뒀다가 펼 때 그대로 복원한다
+    bool panelsHiddenByTab_ = false;     // Tab 으로 지금 패널이 접힌 상태인지
     QDockWidget* dockMain_ = nullptr;
     QDockWidget* dockColor_ = nullptr;
     QDockWidget* dockTool_ = nullptr;
